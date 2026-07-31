@@ -46,6 +46,8 @@ def test_price_gamma_chart_contains_candles_history_and_profile() -> None:
 
 def test_chart_document_uses_lightweight_charts_and_touch_controls() -> None:
     document = _chart_document('{"title":"Test","series":[]}')
-    assert "app/static/lightweight-charts.standalone.production.js" in document
+    assert "TradingView Lightweight Charts" in document
+    assert 'src="/app/static/lightweight-charts.standalone.production.js"' not in document
+    assert "Chart rendering error:" in document
     assert "horzTouchDrag: true" in document
     assert "pinch: true" in document

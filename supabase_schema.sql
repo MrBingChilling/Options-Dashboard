@@ -82,3 +82,6 @@ revoke all on table public.stock_candles from anon, authenticated;
 
 comment on table public.stock_candles is
     'Private split-adjusted daily OHLCV candles cached for dashboard price overlays.';
+
+-- Make newly created tables and constraints visible to Supabase's REST API immediately.
+notify pgrst, 'reload schema';

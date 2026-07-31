@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from datetime import date, timedelta
+from functools import lru_cache
 import json
 from math import isfinite
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
@@ -16,6 +18,16 @@ TOTAL_COLOR = "#C084FC"
 FLIP_COLOR = "#F6C85F"
 PRICE_COLOR = "#F4F7FB"
 MUTED = "#8B97AD"
+
+
+@lru_cache(maxsize=1)
+def _chart_library_source() -> str:
+    """Load the bundled chart engine for direct embedding in each iframe."""
+    path = Path(__file__).resolve().parent.parent / "static" / "lightweight-charts.standalone.production.js"
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise RuntimeError(f"Bundled chart engine could not be loaded: {exc}") from exc
 
 
 def _number(value: Any) -> float | None:
@@ -334,13 +346,18 @@ def render_chart(spec: dict[str, Any], height: int = 460) -> None:
 
 
 def _chart_document(payload: str) -> str:
+    # The app previously referenced /app/static/... from inside a srcdoc iframe.
+    # That URL is deployment/base-path dependent and can leave a fully styled but
+    # empty chart shell. Embedding the vendored library makes every chart
+    # self-contained and avoids any browser-side asset request.
+    chart_library = _chart_library_source()
     return f"""
 <!doctype html>
 <html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
-  <script src="/app/static/lightweight-charts.standalone.production.js"></script>
+  <script>{chart_library}</script>
   <style>
     * {{ box-sizing: border-box; }}
     html, body {{ margin: 0; width: 100%; height: 100%; overflow: hidden; background: transparent; color: #E5EAF2; font-family: Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif; }}
@@ -355,6 +372,7 @@ def _chart_document(payload: str) -> str:
     #chart {{ position: relative; width: 100%; height: calc(100% - 58px); }}
     #tip {{ position: absolute; left: 10px; top: 66px; z-index: 8; pointer-events: none; background: rgba(8,13,24,.91); border: 1px solid #2B3752; border-radius: 7px; padding: 6px 8px; font-size: 10px; line-height: 1.45; display: none; max-width: min(360px, calc(100% - 20px)); }}
     #gamma-label {{ position: absolute; right: 52px; top: 66px; z-index: 7; color: #A8B3C7; font-size: 10px; background: rgba(14,21,37,.72); padding: 3px 5px; border-radius: 4px; pointer-events: none; }}
+    #chart-error {{ position: absolute; inset: 74px 18px 18px; z-index: 20; display: none; align-items: center; justify-content: center; padding: 18px; color: #FCA5A5; background: rgba(14,21,37,.96); border: 1px solid rgba(251,113,133,.55); border-radius: 8px; text-align: center; font-size: 12px; line-height: 1.5; }}
     .gamma-canvas {{ position: absolute; inset: 0; z-index: 5; pointer-events: none; }}
     @media (max-width: 620px) {{ #head {{ height: 72px; display: block; }} #legend {{ justify-content: flex-start; margin-top: 6px; flex-wrap: nowrap; overflow-x: auto; }} #chart {{ height: calc(100% - 72px); }} #tip, #gamma-label {{ top: 80px; }} #subtitle {{ max-width: 92vw; }} }}
   </style>
@@ -362,8 +380,16 @@ def _chart_document(payload: str) -> str:
 <body>
   <div id="wrap">
     <div id="head"><div><div id="title"></div><div id="subtitle"></div></div><div id="legend"></div></div>
-    <div id="chart"></div><div id="tip"></div><div id="gamma-label"></div>
+    <div id="chart"></div><div id="tip"></div><div id="gamma-label"></div><div id="chart-error"></div>
   </div>
+  <script>
+    window.addEventListener('error', (event) => {{
+      const panel = document.getElementById('chart-error');
+      if (!panel) return;
+      panel.textContent = `Chart rendering error: ${{event.message || 'unknown browser error'}}`;
+      panel.style.display = 'flex';
+    }});
+  </script>
   <script>
   (() => {{
     const spec = {payload};
