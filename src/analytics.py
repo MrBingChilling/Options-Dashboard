@@ -87,17 +87,34 @@ def enrich_chain(
     frame = chain.copy()
     spot = float(frame["underlyingPrice"].dropna().median())
     signs = assumption_signs(frame["side"], assumption)
+    volatility = pd.to_numeric(frame["iv"], errors="coerce").to_numpy(float)
     model_gamma = black_scholes_gamma(
         spot,
         frame["strike"].to_numpy(float),
         frame["dte"].to_numpy(float) / 365.0,
-        frame["iv"].fillna(0).to_numpy(float),
+        volatility,
         risk_free_rate,
         dividend_yield,
     )
     vendor_gamma = pd.to_numeric(frame["gamma"], errors="coerce").to_numpy(float)
-    gamma = np.where(np.isfinite(vendor_gamma) & (vendor_gamma >= 0), vendor_gamma, model_gamma)
+    valid_model_gamma = (
+        np.isfinite(volatility)
+        & (volatility > 0)
+        & np.isfinite(model_gamma)
+        & (model_gamma >= 0)
+    )
+    valid_vendor_gamma = np.isfinite(vendor_gamma) & (vendor_gamma >= 0)
+
+    # MarketData's reported gamma is intentionally low precision and frequently
+    # arrives as zero. Recalculate it from the supplied IV whenever possible so
+    # those rounded zeros do not erase otherwise meaningful aggregate exposure.
+    gamma = np.where(
+        valid_model_gamma,
+        model_gamma,
+        np.where(valid_vendor_gamma, vendor_gamma, 0.0),
+    )
     frame["dealer_sign"] = signs
+    frame["gamma_source"] = np.where(valid_model_gamma, "modelled from IV", "vendor fallback")
     frame["gamma_used"] = gamma
     frame["gex"] = (
         gamma
@@ -130,12 +147,14 @@ def gamma_curve(
     price_grid = np.linspace(spot * lower_pct, spot * upper_pct, points)
     strikes = chain["strike"].to_numpy(float)
     times = chain["dte"].to_numpy(float) / 365.0
-    iv = chain["iv"].fillna(0).to_numpy(float)
+    iv = pd.to_numeric(chain["iv"], errors="coerce").to_numpy(float)
+    valid_iv = np.isfinite(iv) & (iv > 0)
     weights = (
         chain["openInterest"].to_numpy(float)
         * CONTRACT_MULTIPLIER
         * assumption_signs(chain["side"], assumption)
     )
+    weights = np.where(valid_iv, weights, 0.0)
 
     totals: list[float] = []
     for simulated_spot in price_grid:

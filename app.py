@@ -118,8 +118,9 @@ with st.sidebar:
         "Minimum open interest",
         min_value=0,
         max_value=100000,
-        value=1,
+        value=10,
         step=10,
+        help="A small liquidity floor removes immaterial one-contract noise without changing major positioning levels.",
     )
     assumption = st.selectbox(
         "Dealer-position assumption",
@@ -281,9 +282,21 @@ with expiry_tab:
         config={"displaylogo": False},
     )
     display_expiry = expiry_profile.copy()
-    display_expiry["call_gex"] /= 1e6
-    display_expiry["put_gex"] /= 1e6
-    display_expiry["net_gex"] /= 1e6
+    gex_columns = ["call_gex", "put_gex", "net_gex"]
+    for column in gex_columns:
+        values_mm = display_expiry[column] / 1e6
+        display_expiry[column] = values_mm.mask(values_mm.abs() < 0.00005, 0.0).round(4)
+
+    gross_by_expiry = expiry_profile["call_gex"].abs() + expiry_profile["put_gex"].abs()
+    if not gross_by_expiry.empty and gross_by_expiry.sum() > 0:
+        dominant_index = gross_by_expiry.idxmax()
+        dominant_date = expiry_profile.loc[dominant_index, "expiration_date"]
+        dominant_share = gross_by_expiry.loc[dominant_index] / gross_by_expiry.sum()
+        st.caption(
+            f"Largest expiration: {dominant_date:%Y-%m-%d} "
+            f"({dominant_share:.1%} of gross expiration GEX). "
+            "Values below $50 display as 0.0000 mm."
+        )
     st.dataframe(
         display_expiry.rename(
             columns={
@@ -293,6 +306,12 @@ with expiry_tab:
                 "net_gex": "Net GEX ($mm)",
             }
         ),
+        column_config={
+            "Expiration": st.column_config.DateColumn(format="YYYY-MM-DD"),
+            "Call GEX ($mm)": st.column_config.NumberColumn(format="%.4f"),
+            "Put GEX ($mm)": st.column_config.NumberColumn(format="%.4f"),
+            "Net GEX ($mm)": st.column_config.NumberColumn(format="%.4f"),
+        },
         hide_index=True,
         use_container_width=True,
     )
@@ -375,12 +394,20 @@ with data_tab:
             "iv",
             "delta",
             "gamma",
+            "gamma_used",
+            "gamma_source",
             "gex",
         ]
     ].copy()
     table["expiration"] = pd.to_datetime(table["expiration"]).dt.date
     table["gex"] = table["gex"] / 1e6
-    table = table.rename(columns={"gex": "gex_usd_mm_per_1pct"})
+    table = table.rename(
+        columns={
+            "gamma": "vendor_gamma",
+            "gamma_used": "gamma_used_for_gex",
+            "gex": "gex_usd_mm_per_1pct",
+        }
+    )
     st.dataframe(table, hide_index=True, use_container_width=True, height=560)
     st.download_button(
         "Download filtered chain as CSV",
@@ -394,7 +421,7 @@ with method_tab:
     st.subheader("What the dashboard is estimating")
     st.markdown(
         """
-        - **Gamma exposure (GEX):** `gamma × open interest × 100 × spot² × 1% × assumed dealer sign`.
+        - **Gamma exposure (GEX):** `gamma × open interest × 100 × spot² × 1% × assumed dealer sign`. Gamma is recalculated from each contract's supplied IV and DTE; vendor gamma is used only when valid IV is unavailable.
         - **Gamma flip:** the closest zero crossing after repricing contract gamma over a 70%–130% spot range with Black–Scholes gamma and each contract's implied volatility.
         - **Call/put walls:** the strikes with the largest absolute call-side and put-side gamma exposure inside the selected DTE horizon.
         - **Positive net gamma:** a heuristic for dealer hedging that may oppose price moves. **Negative net gamma:** a heuristic for hedging that may reinforce price moves.

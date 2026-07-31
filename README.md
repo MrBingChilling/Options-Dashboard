@@ -106,7 +106,7 @@ For each contract:
 GEX = gamma × open interest × 100 × spot² × 0.01 × assumed dealer sign
 ```
 
-This produces estimated dollar gamma exposure for a 1% underlying move. Current strike GEX uses the provider's contract gamma when available. The gamma-regime curve reprices gamma with Black–Scholes using contract IV, DTE, the selected risk-free rate, and dividend yield.
+This produces estimated dollar gamma exposure for a 1% underlying move. MarketData's vendor gamma is low precision and can be reported as zero. The dashboard therefore recalculates gamma with Black–Scholes from the supplied IV and DTE whenever valid IV is available, and uses vendor gamma only as a fallback. The gamma-regime curve uses the same model inputs across its simulated spot range.
 
 ### Dealer assumptions
 
