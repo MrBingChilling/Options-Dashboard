@@ -340,7 +340,7 @@ def _chart_document(payload: str) -> str:
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
-  <script src="app/static/lightweight-charts.standalone.production.js"></script>
+  <script src="/app/static/lightweight-charts.standalone.production.js"></script>
   <style>
     * {{ box-sizing: border-box; }}
     html, body {{ margin: 0; width: 100%; height: 100%; overflow: hidden; background: transparent; color: #E5EAF2; font-family: Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif; }}
