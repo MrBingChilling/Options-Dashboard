@@ -26,7 +26,18 @@ from src.charts import (
     strike_gex_chart,
 )
 from src.config import as_bool, get_setting
-from src.expiration_filters import EXPIRATION_FILTERS, FILTER_ALL, resolve_expiration_filter
+from src.expiration_filters import (
+    CUSTOM_DTE_MAX,
+    EXPIRATION_CHOICES,
+    FILTER_ALL,
+    FILTER_CUSTOM,
+    FILTER_MONTHLY,
+    FILTER_OVER_ONE_YEAR,
+    FILTER_61_120,
+    PRESET_DTE_RANGES,
+    custom_expiration_selection,
+    resolve_expiration_filter,
+)
 from src.marketdata_client import MarketDataClient, MarketDataError
 from src.storage import SnapshotStore, SnapshotStoreError
 
@@ -179,6 +190,16 @@ def calculate_positioning(
     return enriched, curve, profile, expiry_profile, summary
 
 
+def apply_expiration_preset() -> None:
+    preset = st.session_state.get("expiration_preset")
+    if preset in PRESET_DTE_RANGES:
+        st.session_state["expiration_dte_range"] = PRESET_DTE_RANGES[preset]
+
+
+def mark_expiration_range_custom() -> None:
+    st.session_state["expiration_preset"] = FILTER_CUSTOM
+
+
 st.set_page_config(
     page_title="Options Positioning Dashboard",
     page_icon="◈",
@@ -227,12 +248,37 @@ with st.sidebar:
         value=previous_weekday(datetime.now(EASTERN).date()),
         max_value=datetime.now(EASTERN).date(),
     )
-    expiration_filter = st.selectbox(
-        "Expiration filter",
-        options=EXPIRATION_FILTERS,
-        index=EXPIRATION_FILTERS.index(FILTER_ALL),
-        help="Changing this selection requires Load positioning because it changes the option-chain request.",
+    if "expiration_preset" not in st.session_state:
+        st.session_state["expiration_preset"] = FILTER_61_120
+    if "expiration_dte_range" not in st.session_state:
+        st.session_state["expiration_dte_range"] = PRESET_DTE_RANGES[FILTER_61_120]
+
+    expiration_preset = st.selectbox(
+        "Quick expiration bucket",
+        options=EXPIRATION_CHOICES,
+        key="expiration_preset",
+        on_change=apply_expiration_preset,
+        help="Choose a preset, or move the DTE slider below for a precise custom range.",
     )
+    range_disabled = expiration_preset in {FILTER_ALL, FILTER_MONTHLY, FILTER_OVER_ONE_YEAR}
+    dte_range = st.slider(
+        "Fine-tune DTE range",
+        min_value=0,
+        max_value=CUSTOM_DTE_MAX,
+        step=1,
+        key="expiration_dte_range",
+        disabled=range_disabled,
+        on_change=mark_expiration_range_custom,
+        help="Moving either handle switches the request to a custom DTE range. Open-ended presets bypass the slider.",
+    )
+    selection = (
+        custom_expiration_selection(int(dte_range[0]), int(dte_range[1]))
+        if expiration_preset == FILTER_CUSTOM
+        else resolve_expiration_filter(expiration_preset)
+    )
+    expiration_filter = selection.label
+    if range_disabled:
+        st.caption("This preset is open-ended; choose Custom DTE range to use the slider.")
     min_open_interest = st.number_input(
         "Minimum open interest",
         min_value=0,
@@ -293,8 +339,12 @@ if load:
                 chain_result = client.fetch_chain(
                     symbol,
                     analysis_date,
+                    min_dte=selection.min_dte,
+                    max_dte=selection.max_dte,
                     min_open_interest=int(min_open_interest),
-                    expiration_filter=expiration_filter,
+                    expiration_filter=(
+                        None if expiration_preset == FILTER_CUSTOM else expiration_preset
+                    ),
                 )
                 try:
                     price_candles, price_warning = load_price_candles(
@@ -306,7 +356,15 @@ if load:
                 except MarketDataError as exc:
                     price_candles = pd.DataFrame()
                     price_warning = f"Options loaded, but price history could not be loaded: {exc}"
-                selection = resolve_expiration_filter(expiration_filter)
+                latest_price = None
+                latest_price_updated = None
+                latest_price_warning = None
+                try:
+                    latest = client.fetch_latest_price(symbol)
+                    latest_price = latest.price
+                    latest_price_updated = latest.updated
+                except MarketDataError as exc:
+                    latest_price_warning = f"Latest stock price could not be loaded: {exc}"
                 st.session_state["dashboard_result"] = {
                     "symbol": symbol,
                     "raw_chain": chain_result.data,
@@ -317,6 +375,10 @@ if load:
                     "max_dte": selection.max_dte,
                     "price_candles": price_candles,
                     "price_warning": price_warning,
+                    "latest_price": latest_price,
+                    "latest_price_updated": latest_price_updated,
+                    "latest_price_warning": latest_price_warning,
+                    "api_usage": client.usage_summary(),
                 }
                 st.session_state["save_after_recalculation"] = True
         except (MarketDataError, ValueError) as exc:
@@ -365,6 +427,14 @@ else:
     )
 if result_state.get("price_warning"):
     st.warning(result_state["price_warning"])
+if result_state.get("latest_price_warning"):
+    st.warning(result_state["latest_price_warning"])
+api_usage = result_state.get("api_usage") or {}
+if api_usage.get("consumed") is not None:
+    usage_text = f"MarketData credits reported for this load: {api_usage['consumed']}"
+    if api_usage.get("remaining") is not None:
+        usage_text += f" · {api_usage['remaining']} remaining"
+    st.caption(usage_text)
 
 history = pd.DataFrame()
 history_error = None
@@ -394,17 +464,28 @@ overview_tab, expiry_tab, history_tab, data_tab, method_tab = st.tabs(
 )
 
 with overview_tab:
-    first_row = st.columns(4)
-    first_row[0].metric("Spot", f"${summary.spot:,.2f}")
-    first_row[1].metric("Gamma flip", f"${summary.gamma_flip:,.2f}" if summary.gamma_flip else "No flip")
-    first_row[2].metric("Call wall", f"${summary.call_wall:,.2f}")
-    first_row[3].metric("Put wall", f"${summary.put_wall:,.2f}")
+    latest_price = result_state.get("latest_price")
+    first_row = st.columns(5)
+    first_row[0].metric("Latest price", f"${latest_price:,.2f}" if latest_price is not None else "—")
+    first_row[1].metric("Options snapshot spot", f"${summary.spot:,.2f}")
+    first_row[2].metric("Gamma flip", f"${summary.gamma_flip:,.2f}" if summary.gamma_flip else "No flip")
+    first_row[3].metric("Call wall", f"${summary.call_wall:,.2f}")
+    first_row[4].metric("Put wall", f"${summary.put_wall:,.2f}")
+    if result_state.get("latest_price_updated") is not None:
+        st.caption(
+            f"Latest stock midpoint: {result_state['latest_price_updated']:%Y-%m-%d %H:%M %Z}. "
+            f"Options levels remain based on the {summary.snapshot_date} end-of-day chain."
+        )
 
     second_row = st.columns(4)
     second_row[0].metric("Net GEX / 1%", compact_dollars(summary.net_gex))
     second_row[1].metric("Absolute total GEX / 1%", compact_dollars(summary.gross_gex))
-    second_row[2].metric("Put/call OI", f"{summary.put_call_oi_ratio:.2f}" if summary.put_call_oi_ratio is not None else "—")
+    second_row[2].metric("Put/call OI ratio", f"{summary.put_call_oi_ratio:.2f}" if summary.put_call_oi_ratio is not None else "—")
     second_row[3].metric("Net delta exposure", compact_dollars(summary.net_delta_exposure))
+    st.caption(
+        f"Put/call OI = total put open interest ÷ total call open interest within this filter: "
+        f"{summary.put_open_interest:,} ÷ {summary.call_open_interest:,}."
+    )
 
     if abs(summary.net_gex) <= max(summary.gross_gex, 1.0) * 1e-12:
         regime = "neutral gamma under the selected weights"
@@ -442,6 +523,8 @@ with overview_tab:
             gamma_mode=gamma_mode,
             show_levels=True,
             show_regime=show_regime,
+            latest_price=result_state.get("latest_price"),
+            latest_price_updated=result_state.get("latest_price_updated"),
         ),
         height=680,
     )
@@ -502,14 +585,14 @@ with history_tab:
             )
             changes[2].metric("Call wall", f"${latest['call_wall']:,.2f}", f"${latest['call_wall'] - prior['call_wall']:+,.2f}")
             changes[3].metric("Put wall", f"${latest['put_wall']:,.2f}", f"${latest['put_wall'] - prior['put_wall']:+,.2f}")
-            changes[4].metric("Put/call OI", f"{latest['put_call_oi_ratio']:.2f}", f"{latest['put_call_oi_ratio'] - prior['put_call_oi_ratio']:+.2f}")
+            changes[4].metric("Put/call OI ratio", f"{latest['put_call_oi_ratio']:.2f}", f"{latest['put_call_oi_ratio'] - prior['put_call_oi_ratio']:+.2f}")
 
     history_controls = st.columns([1, 1, 2])
     history_style = history_controls[0].segmented_control(
         "Price style", ["Candlestick", "Line"], default="Candlestick", key="history_price_style"
     ) or "Candlestick"
     history_period = history_controls[1].selectbox("Visible period", ["6M", "1Y", "2Y", "5Y"], index=2, key="history_period")
-    history_controls[2].caption("Price, flip and walls share the right axis; net GEX and put/call OI occupy the lower indicator band.")
+    history_controls[2].caption("Price, flip and walls share the right axis; net GEX and the put/call OI ratio occupy the lower indicator band.")
     visible_candles, visible_history = filtered_period(price_candles, history_with_current, history_period)
     render_chart(
         price_gamma_chart(
@@ -519,6 +602,8 @@ with history_tab:
             price_style=history_style,
             show_levels=True,
             show_regime=True,
+            latest_price=result_state.get("latest_price"),
+            latest_price_updated=result_state.get("latest_price_updated"),
             title="Price with positioning history",
         ),
         height=650,
@@ -569,6 +654,8 @@ with method_tab:
         - **Gamma flip:** the nearest zero crossing after repricing contract gamma across a 70%–130% spot range.
         - **Call/put walls:** strikes with the greatest unweighted call-side and put-side gamma concentration. Their locations remain defined even when a scenario weight is zero.
         - **Price history:** split-adjusted daily MarketData.app candles cached in Supabase and reused by Overview and History.
+        - **Latest price:** MarketData.app's real-time stock midpoint is drawn separately from the completed daily candles. It does not make the one-day-old option positions current.
+        - **Put/call OI ratio:** total open interest of the selected put contracts divided by total open interest of the selected call contracts. It is not the day's put/call trading volume.
 
         Current scenario weights: **calls {summary.dealer_call_weight:+.2f}**, **puts {summary.dealer_put_weight:+.2f}**. These are assumptions, not measured dealer inventory. Open interest identifies outstanding contracts but not their owner or trade direction. The charts are a positioning lens, not a prediction or trading signal.
         """

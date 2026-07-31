@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 import re
-from typing import Any
+from typing import Any, Mapping
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -66,6 +66,20 @@ class ChainResult:
     snapshot_date: date
 
 
+@dataclass(frozen=True)
+class LatestPrice:
+    price: float
+    updated: datetime
+
+
+@dataclass(frozen=True)
+class ApiUsage:
+    endpoint: str
+    consumed: int | None
+    remaining: int | None
+    limit: int | None
+
+
 class MarketDataClient:
     BASE_URL = "https://api.marketdata.app/v1"
 
@@ -74,6 +88,7 @@ class MarketDataClient:
             raise ValueError("A MarketData.app token is required.")
         self.timeout = timeout
         self.session = requests.Session()
+        self.usage_events: list[ApiUsage] = []
         self.session.headers.update(
             {"Authorization": f"Bearer {token}", "Accept": "application/json"}
         )
@@ -150,6 +165,7 @@ class MarketDataClient:
             params=params,
             timeout=self.timeout,
         )
+        self._record_usage(response, "options chain")
         if response.status_code not in {200, 203}:
             detail = self._error_detail(response)
             latest_available = self._latest_available_date(detail)
@@ -182,6 +198,7 @@ class MarketDataClient:
             },
             timeout=self.timeout,
         )
+        self._record_usage(response, "daily candles")
         if response.status_code not in {200, 203}:
             raise MarketDataError(
                 f"MarketData.app price history returned HTTP {response.status_code}: "
@@ -194,6 +211,56 @@ class MarketDataClient:
         if payload.get("s") != "ok":
             raise MarketDataError(payload.get("errmsg") or "No price candles were found.")
         return self._payload_to_candles(payload)
+
+    def fetch_latest_price(self, symbol: str) -> LatestPrice:
+        """Return MarketData.app's real-time SmartMid stock price.
+
+        This is deliberately separate from daily candles: the candle endpoint
+        cannot provide a real-time in-progress OHLC bar.
+        """
+        symbol = symbol.strip().upper()
+        if not symbol or not symbol.replace(".", "").replace("-", "").isalnum():
+            raise ValueError("Enter a valid US ticker symbol.")
+        response = self.session.get(
+            f"{self.BASE_URL}/stocks/prices/{symbol}/",
+            params={"extended": "true"},
+            timeout=self.timeout,
+        )
+        self._record_usage(response, "real-time stock price")
+        if response.status_code not in {200, 203}:
+            raise MarketDataError(
+                f"MarketData.app real-time price returned HTTP {response.status_code}: "
+                f"{self._error_detail(response)}"
+            )
+        try:
+            payload = response.json()
+        except requests.JSONDecodeError as exc:
+            raise MarketDataError("MarketData.app returned invalid real-time price JSON.") from exc
+        if payload.get("s") != "ok" or not payload.get("mid") or not payload.get("updated"):
+            raise MarketDataError(payload.get("errmsg") or "No real-time stock price was found.")
+        try:
+            price = float(payload["mid"][0])
+            updated = datetime.fromtimestamp(int(payload["updated"][0]), tz=EASTERN)
+        except (IndexError, TypeError, ValueError) as exc:
+            raise MarketDataError("The real-time stock-price response was malformed.") from exc
+        return LatestPrice(price=price, updated=updated)
+
+    def usage_summary(self) -> dict[str, Any]:
+        consumed_values = [event.consumed for event in self.usage_events if event.consumed is not None]
+        last_remaining = next(
+            (event.remaining for event in reversed(self.usage_events) if event.remaining is not None),
+            None,
+        )
+        last_limit = next(
+            (event.limit for event in reversed(self.usage_events) if event.limit is not None),
+            None,
+        )
+        return {
+            "consumed": sum(consumed_values) if consumed_values else None,
+            "remaining": last_remaining,
+            "limit": last_limit,
+            "events": [event.__dict__.copy() for event in self.usage_events],
+        }
 
     @staticmethod
     def _payload_to_candles(payload: dict[str, Any]) -> pd.DataFrame:
@@ -225,6 +292,24 @@ class MarketDataClient:
             return str(payload.get("errmsg") or payload.get("message") or response.reason)
         except requests.JSONDecodeError:
             return response.text[:240] or response.reason
+
+    def _record_usage(self, response: requests.Response, endpoint: str) -> None:
+        headers = getattr(response, "headers", {})
+        if not isinstance(headers, Mapping):
+            return
+
+        def header_int(name: str) -> int | None:
+            raw = headers.get(name)
+            try:
+                return int(raw) if raw is not None else None
+            except (TypeError, ValueError):
+                return None
+
+        consumed = header_int("X-Api-Ratelimit-Consumed")
+        remaining = header_int("X-Api-Ratelimit-Remaining")
+        limit = header_int("X-Api-Ratelimit-Limit")
+        if consumed is not None or remaining is not None or limit is not None:
+            self.usage_events.append(ApiUsage(endpoint, consumed, remaining, limit))
 
     @staticmethod
     def _latest_available_date(message: str) -> date | None:

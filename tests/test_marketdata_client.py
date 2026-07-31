@@ -5,7 +5,12 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 
 from src.marketdata_client import MarketDataClient
-from src.expiration_filters import FILTER_MONTHLY, FILTER_OVER_ONE_YEAR, resolve_expiration_filter
+from src.expiration_filters import (
+    FILTER_MONTHLY,
+    FILTER_OVER_ONE_YEAR,
+    custom_expiration_selection,
+    resolve_expiration_filter,
+)
 
 
 EASTERN = ZoneInfo("America/New_York")
@@ -87,6 +92,15 @@ def test_over_one_year_filter_has_open_ended_start_date() -> None:
     assert selection.request_params(date(2026, 7, 30)) == {"from": "2027-07-31"}
 
 
+def test_custom_slider_can_select_one_exact_dte() -> None:
+    selection = custom_expiration_selection(90, 90)
+    assert selection.label == "Custom 90 DTE"
+    assert selection.request_params(date(2026, 7, 30)) == {
+        "from": "2026-10-28",
+        "to": "2026-10-28",
+    }
+
+
 def test_stock_candles_payload_is_normalized() -> None:
     payload = {
         "s": "ok",
@@ -100,3 +114,43 @@ def test_stock_candles_payload_is_normalized() -> None:
     candles = MarketDataClient._payload_to_candles(payload)
     assert candles.columns.tolist() == ["time", "open", "high", "low", "close", "volume"]
     assert candles["close"].tolist() == [101.0, 102.0]
+
+
+def test_latest_stock_price_and_credit_headers_are_normalized() -> None:
+    updated = int(datetime(2026, 7, 31, 13, 15, tzinfo=EASTERN).timestamp())
+    response = Mock(
+        status_code=200,
+        reason="OK",
+        text="",
+        headers={
+            "X-Api-Ratelimit-Consumed": "1",
+            "X-Api-Ratelimit-Remaining": "999",
+            "X-Api-Ratelimit-Limit": "1000",
+        },
+    )
+    response.json.return_value = {
+        "s": "ok",
+        "symbol": ["SPY"],
+        "mid": [636.25],
+        "updated": [updated],
+    }
+    client = MarketDataClient("test-token")
+    client.session.get = Mock(return_value=response)
+
+    latest = client.fetch_latest_price("SPY")
+
+    assert latest.price == 636.25
+    assert latest.updated == datetime(2026, 7, 31, 13, 15, tzinfo=EASTERN)
+    assert client.usage_summary() == {
+        "consumed": 1,
+        "remaining": 999,
+        "limit": 1000,
+        "events": [
+            {
+                "endpoint": "real-time stock price",
+                "consumed": 1,
+                "remaining": 999,
+                "limit": 1000,
+            }
+        ],
+    }

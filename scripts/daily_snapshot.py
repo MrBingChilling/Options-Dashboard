@@ -61,6 +61,7 @@ def main() -> int:
     failures = 0
     symbols = [value.strip().upper() for value in args.symbols.split(",") if value.strip()]
     for symbol in symbols:
+        usage_start = len(client.usage_events)
         try:
             result = client.fetch_chain(
                 symbol,
@@ -114,6 +115,21 @@ def main() -> int:
         except Exception as exc:  # keep processing the remainder of the watchlist
             failures += 1
             print(f"Failed {symbol}: {exc}", file=sys.stderr)
+        finally:
+            symbol_usage = client.usage_events[usage_start:]
+            if symbol_usage:
+                detail = ", ".join(
+                    f"{event.endpoint}={event.consumed if event.consumed is not None else '?'}"
+                    for event in symbol_usage
+                )
+                consumed = [event.consumed for event in symbol_usage if event.consumed is not None]
+                remaining = next(
+                    (event.remaining for event in reversed(symbol_usage) if event.remaining is not None),
+                    None,
+                )
+                total_text = str(sum(consumed)) if consumed else "unknown"
+                remaining_text = f"; {remaining} remaining" if remaining is not None else ""
+                print(f"MarketData credits for {symbol}: {total_text} ({detail}){remaining_text}.")
     return 1 if failures else 0
 
 

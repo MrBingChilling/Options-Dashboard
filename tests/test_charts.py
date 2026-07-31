@@ -31,7 +31,13 @@ def test_price_gamma_chart_contains_candles_history_and_profile() -> None:
             "put_gex": [-3.0, -2.0, -1.0],
         }
     )
-    spec = price_gamma_chart(candles, history, profile=profile)
+    spec = price_gamma_chart(
+        candles,
+        history,
+        profile=profile,
+        latest_price=103.5,
+        latest_price_updated=pd.Timestamp("2026-07-31 13:30"),
+    )
     assert spec["series"][0]["type"] == "candlestick"
     assert len(spec["gammaProfile"]) == 3
     assert {series["name"] for series in spec["series"]} >= {
@@ -40,8 +46,34 @@ def test_price_gamma_chart_contains_candles_history_and_profile() -> None:
         "Call wall",
         "Put wall",
         "Net GEX ($mm)",
-        "Put/call OI",
+        "Put/call OI ratio",
+        "Latest price",
     }
+    latest = next(series for series in spec["series"] if series["name"] == "Latest price")
+    assert latest["data"] == [{"time": "2026-07-31", "value": 103.5}]
+    assert latest["options"]["priceLineVisible"] is True
+
+
+def test_line_chart_extends_to_latest_price() -> None:
+    candles = pd.DataFrame(
+        {
+            "time": pd.to_datetime(["2026-07-30"]),
+            "open": [100.0],
+            "high": [102.0],
+            "low": [99.0],
+            "close": [101.0],
+            "volume": [1000],
+        }
+    )
+    spec = price_gamma_chart(
+        candles,
+        pd.DataFrame(),
+        price_style="Line",
+        latest_price=102.25,
+        latest_price_updated=pd.Timestamp("2026-07-31 10:00"),
+    )
+    price = next(series for series in spec["series"] if series["name"] == "Price")
+    assert price["data"][-1] == {"time": "2026-07-31", "value": 102.25}
 
 
 def test_chart_document_uses_lightweight_charts_and_touch_controls() -> None:

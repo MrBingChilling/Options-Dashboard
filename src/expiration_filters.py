@@ -11,6 +11,7 @@ FILTER_241_365 = "241–365 DTE"
 FILTER_OVER_ONE_YEAR = "Over one year"
 FILTER_MONTHLY = "Monthly expirations only"
 FILTER_ALL = "All expirations"
+FILTER_CUSTOM = "Custom DTE range"
 
 EXPIRATION_FILTERS = (
     FILTER_21_60,
@@ -21,6 +22,19 @@ EXPIRATION_FILTERS = (
     FILTER_MONTHLY,
     FILTER_ALL,
 )
+
+EXPIRATION_CHOICES = (*EXPIRATION_FILTERS, FILTER_CUSTOM)
+
+# The slider covers the practical listed-equity/ETF LEAPS horizon. The
+# dedicated "Over one year" and "All expirations" presets remain open-ended.
+CUSTOM_DTE_MAX = 1095
+
+PRESET_DTE_RANGES = {
+    FILTER_21_60: (21, 60),
+    FILTER_61_120: (61, 120),
+    FILTER_121_240: (121, 240),
+    FILTER_241_365: (241, 365),
+}
 
 
 @dataclass(frozen=True)
@@ -66,6 +80,7 @@ def resolve_expiration_filter(label: str) -> ExpirationSelection:
 
 
 def custom_expiration_selection(min_dte: int, max_dte: int) -> ExpirationSelection:
-    if min_dte < 0 or max_dte <= min_dte:
-        raise ValueError("Maximum DTE must be greater than minimum DTE.")
-    return ExpirationSelection(f"Custom {min_dte}–{max_dte} DTE", min_dte, max_dte)
+    if min_dte < 0 or max_dte < min_dte:
+        raise ValueError("Maximum DTE must be greater than or equal to minimum DTE.")
+    label = f"Custom {min_dte} DTE" if min_dte == max_dte else f"Custom {min_dte}–{max_dte} DTE"
+    return ExpirationSelection(label, min_dte, max_dte)

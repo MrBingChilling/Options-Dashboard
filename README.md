@@ -4,14 +4,14 @@ A private, mobile-friendly Streamlit dashboard for slower-moving US equity and E
 
 ## What this version includes
 
-- Seven expiration filters: 21–60, 61–120, 121–240, 241–365, over one year, standard monthly only, and all expirations
+- Seven quick expiration filters plus a synchronized custom 0–1,095 DTE range slider
 - Gamma exposure by strike and separate net/absolute-total gamma charts by expiration
 - Modelled gamma flip across a 70%–130% underlying-price range
 - Call wall and put wall
 - Net and absolute-total gamma exposure per 1% underlying move
 - Put/call open-interest ratio and net delta exposure
 - Fixed assumptions plus adjustable call/put dealer weights from −1 to +1
-- Split-adjusted daily price candles cached in Supabase
+- Split-adjusted daily price candles cached in Supabase, with a separate real-time stock-price overlay
 - Price/history overlays for spot, flip, walls, net GEX, and put/call OI
 - A large price-and-gamma map with candlestick/line modes and two right-side gamma-profile layouts
 - TradingView Lightweight Charts interactions across all analytical charts: mouse/touch panning, wheel/pinch zoom, crosshairs, and tappable series controls
@@ -96,7 +96,8 @@ In the GitHub repository:
    - `SUPABASE_SECRET_KEY`
 3. Add these repository variables:
    - `WATCHLIST` — comma-separated, for example `SPY,QQQ,NVDA,MSFT`
-   - `EXPIRATION_FILTER` — use one exact value from the list below; if omitted, the workflow uses `All expirations`
+   - `EXPIRATION_FILTER` — use one exact value from the list below; if omitted, the workflow uses the credit-conscious `61–120 DTE`
+   - `MIN_OPEN_INTEREST` — optional; defaults to `10` to exclude tiny positions and reduce returned contracts
    - `DEALER_ASSUMPTION` — optional; defaults to `Standard: calls + / puts -`
    - `DEALER_CALL_WEIGHT` — optional; used by `Custom dealer weights`, for example `-0.40`
    - `DEALER_PUT_WEIGHT` — optional; used by `Custom dealer weights`, for example `-0.70`
@@ -114,7 +115,9 @@ Monthly expirations only
 All expirations
 ```
 
-Start with a short watchlist and check MarketData.app credit usage before expanding it. Scheduled jobs upsert the same ticker/date/model combination, so rerunning a day does not create duplicates.
+Start with a short watchlist and check MarketData.app credit usage before expanding it. The Action log now prints the credits MarketData reports for each ticker and endpoint. Scheduled jobs upsert the same ticker/date/model combination, so rerunning a day does not create duplicate database rows, but it can still repeat API usage.
+
+`All expirations` can be dramatically more expensive than a bounded DTE range for SPY, QQQ, and other large chains. Historical chains are billed according to the number of option symbols returned. The most effective controls are a bounded expiration filter and a sensible minimum OI. Use `All expirations` only when the broader coverage is worth the additional credits.
 
 The collector also saves that session's daily price candle. When the interactive app first needs a longer price chart, it requests up to five years of daily candles once and caches them in `stock_candles`; later chart toggles reuse those rows.
 
@@ -148,10 +151,22 @@ Open interest does not identify the owner or trade direction. These modes are se
 ### Price data and chart engine
 
 - Price charts use MarketData.app's split-adjusted daily stock-candle endpoint, not a TradingView Essential subscription or an IBKR session.
+- The candle endpoint does not supply real-time completed OHLC bars. The dashboard therefore keeps its completed daily candles intact and overlays MarketData.app's real-time SmartMid stock price as a separately labelled line/marker. The option-derived levels remain tied to their end-of-day snapshot.
 - TradingView Essential does not expose a private datafeed API for combining hosted TradingView data with this dashboard's Supabase gamma series.
 - The interface uses the open-source TradingView Lightweight Charts engine. It is only the chart renderer; MarketData.app and Supabase remain the data sources.
 - The pinned chart-engine file and its license are bundled under `static/`, so the deployed app does not depend on a public JavaScript CDN.
 - Changing candlestick/line mode, gamma-profile layout, visible period, chart layers, or dealer weights does not call the options API again.
+- Moving the DTE slider does require **Load positioning**, because a custom expiration range changes which contracts the provider returns.
+
+### Put/call open interest
+
+For the selected DTE range and minimum-OI filter:
+
+```text
+Put/call OI ratio = sum of open interest on included puts / sum of open interest on included calls
+```
+
+Open interest is the number of outstanding contracts that remain open. It is not the day's trading volume. A ratio of `1.66`, for example, means the included puts have 1.66 times the open interest of the included calls. It does not reveal whether those contracts were bought or sold, who owns them, or whether the positioning is a directional bet or a hedge.
 
 ### Walls and flip
 

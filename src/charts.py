@@ -17,6 +17,7 @@ NET_COLOR = "#60A5FA"
 TOTAL_COLOR = "#C084FC"
 FLIP_COLOR = "#F6C85F"
 PRICE_COLOR = "#F4F7FB"
+LATEST_PRICE_COLOR = "#22D3EE"
 MUTED = "#8B97AD"
 
 
@@ -224,7 +225,7 @@ def trend_regime_chart(history: pd.DataFrame) -> dict[str, Any]:
                 priceScaleId="right",
             ),
             _series(
-                "Put/call OI",
+                "Put/call OI ratio",
                 TOTAL_COLOR,
                 _time_points(history, "snapshot_date", "put_call_oi_ratio"),
                 "line",
@@ -244,6 +245,8 @@ def price_gamma_chart(
     gamma_mode: str = "Calls left / puts right",
     show_levels: bool = True,
     show_regime: bool = True,
+    latest_price: float | None = None,
+    latest_price_updated: Any | None = None,
     title: str = "Price action and options positioning",
 ) -> dict[str, Any]:
     candle_rows = []
@@ -260,6 +263,16 @@ def price_gamma_chart(
             }
         )
         line_rows.append({"time": day, "value": float(row.close)})
+    latest_value = _number(latest_price)
+    latest_day = (
+        _date_text(latest_price_updated)
+        if latest_value is not None and latest_price_updated is not None
+        else None
+    )
+    if price_style == "Line" and latest_day is not None:
+        line_rows = [row for row in line_rows if row["time"] != latest_day]
+        line_rows.append({"time": latest_day, "value": latest_value})
+        line_rows.sort(key=lambda row: row["time"])
     price_data = candle_rows if price_style == "Candlestick" else line_rows
     price_type = "candlestick" if price_style == "Candlestick" else "line"
     series = [
@@ -279,6 +292,21 @@ def price_gamma_chart(
             role="price",
         )
     ]
+    if latest_day is not None:
+        series.append(
+            _series(
+                "Latest price",
+                LATEST_PRICE_COLOR,
+                [{"time": latest_day, "value": latest_value}],
+                "line",
+                lineWidth=1,
+                lineStyle=2,
+                lineVisible=False,
+                priceLineVisible=True,
+                lastValueVisible=True,
+                priceScaleId="right",
+            )
+        )
     if show_levels and not history.empty:
         for column, label, color, style in (
             ("gamma_flip", "Gamma flip", FLIP_COLOR, 2),
@@ -310,7 +338,7 @@ def price_gamma_chart(
                     scaleMargins={"top": 0.76, "bottom": 0.03},
                 ),
                 _series(
-                    "Put/call OI",
+                    "Put/call OI ratio",
                     TOTAL_COLOR,
                     _time_points(history, "snapshot_date", "put_call_oi_ratio"),
                     "line",
