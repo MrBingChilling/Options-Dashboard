@@ -1,0 +1,11 @@
+.env
+.venv/
+.deps/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+.streamlit/secrets.toml
+*.zip
+pip-*/
+tmp*
