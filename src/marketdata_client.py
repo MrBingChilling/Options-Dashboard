@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
+import re
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -44,6 +45,14 @@ class MarketDataError(RuntimeError):
     """Raised when MarketData.app cannot return a usable chain."""
 
 
+class _LatestAvailableSession(MarketDataError):
+    """Signals that an EOD-only plan must use an earlier closed session."""
+
+    def __init__(self, message: str, latest_available: date) -> None:
+        super().__init__(message)
+        self.latest_available = latest_available
+
+
 @dataclass(frozen=True)
 class ChainResult:
     data: pd.DataFrame
@@ -79,14 +88,21 @@ class MarketDataClient:
 
         candidate_date = analysis_date
         last_error: str | None = None
-        for _ in range(4):
-            payload = self._request_chain(
-                symbol,
-                candidate_date,
-                min_dte,
-                max_dte,
-                min_open_interest,
-            )
+        for _ in range(5):
+            try:
+                payload = self._request_chain(
+                    symbol,
+                    candidate_date,
+                    min_dte,
+                    max_dte,
+                    min_open_interest,
+                )
+            except _LatestAvailableSession as exc:
+                last_error = str(exc)
+                if exc.latest_available >= candidate_date:
+                    break
+                candidate_date = exc.latest_available
+                continue
             status = payload.get("s")
             if status == "ok":
                 frame = self._payload_to_frame(payload)
@@ -129,6 +145,9 @@ class MarketDataClient:
         )
         if response.status_code not in {200, 203}:
             detail = self._error_detail(response)
+            latest_available = self._latest_available_date(detail)
+            if response.status_code == 402 and latest_available is not None:
+                raise _LatestAvailableSession(detail, latest_available)
             raise MarketDataError(f"MarketData.app returned HTTP {response.status_code}: {detail}")
         try:
             return response.json()
@@ -142,6 +161,20 @@ class MarketDataClient:
             return str(payload.get("errmsg") or payload.get("message") or response.reason)
         except requests.JSONDecodeError:
             return response.text[:240] or response.reason
+
+    @staticmethod
+    def _latest_available_date(message: str) -> date | None:
+        match = re.search(
+            r"latest\s+available(?:\s+session|\s+date)?\s+is\s+(\d{4}-\d{2}-\d{2})",
+            message,
+            flags=re.IGNORECASE,
+        )
+        if match is None:
+            return None
+        try:
+            return date.fromisoformat(match.group(1))
+        except ValueError:
+            return None
 
     @staticmethod
     def _payload_to_frame(payload: dict[str, Any]) -> pd.DataFrame:

@@ -17,6 +17,8 @@ A private, mobile-friendly Streamlit dashboard for slower-moving US equity and E
 
 The app intentionally uses historical end-of-day chains. This fits medium/long-term positioning analysis and avoids spending credits on data freshness that the dashboard does not need.
 
+If the requested date is not yet available on an EOD-only MarketData.app plan, the app automatically retries the provider's latest fully closed session. This keeps manual and scheduled collection working before publication, on weekends, and around market holidays.
+
 ## 1. Create the Supabase table
 
 1. Open your Supabase project.
