@@ -392,7 +392,11 @@ with data_tab:
             "volume",
             "openInterest",
             "iv",
+            "iv_used",
+            "iv_source",
             "delta",
+            "delta_used",
+            "delta_source",
             "gamma",
             "gamma_used",
             "gamma_source",
@@ -404,6 +408,7 @@ with data_tab:
     table = table.rename(
         columns={
             "gamma": "vendor_gamma",
+            "iv": "vendor_iv",
             "gamma_used": "gamma_used_for_gex",
             "gex": "gex_usd_mm_per_1pct",
         }
@@ -421,7 +426,7 @@ with method_tab:
     st.subheader("What the dashboard is estimating")
     st.markdown(
         """
-        - **Gamma exposure (GEX):** `gamma × open interest × 100 × spot² × 1% × assumed dealer sign`. Gamma is recalculated from each contract's supplied IV and DTE; vendor gamma is used only when valid IV is unavailable.
+        - **Gamma exposure (GEX):** `gamma × open interest × 100 × spot² × 1% × assumed dealer sign`. Greeks are recalculated from each contract's IV and DTE. If the provider returns zero/missing IV, the app derives IV from the option quote first; vendor Greeks are the final fallback.
         - **Gamma flip:** the closest zero crossing after repricing contract gamma over a 70%–130% spot range with Black–Scholes gamma and each contract's implied volatility.
         - **Call/put walls:** the strikes with the largest absolute call-side and put-side gamma exposure inside the selected DTE horizon.
         - **Positive net gamma:** a heuristic for dealer hedging that may oppose price moves. **Negative net gamma:** a heuristic for hedging that may reinforce price moves.

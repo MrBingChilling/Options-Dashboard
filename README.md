@@ -106,7 +106,7 @@ For each contract:
 GEX = gamma × open interest × 100 × spot² × 0.01 × assumed dealer sign
 ```
 
-This produces estimated dollar gamma exposure for a 1% underlying move. MarketData's vendor gamma is low precision and can be reported as zero. The dashboard therefore recalculates gamma with Black–Scholes from the supplied IV and DTE whenever valid IV is available, and uses vendor gamma only as a fallback. The gamma-regime curve uses the same model inputs across its simulated spot range.
+This produces estimated dollar gamma exposure for a 1% underlying move. Historical chains can contain rounded zero Greeks and, in some responses, zero or missing IV. The dashboard therefore recalculates Greeks with Black–Scholes from the supplied IV and DTE when available. If IV is unusable, it derives implied volatility from the option quote before calculating the Greeks; vendor Greeks are only the final fallback. An all-zero curve is rejected instead of being shown as a false flip or $50 wall. The gamma-regime curve uses the same model inputs across its simulated spot range.
 
 ### Dealer assumptions
 

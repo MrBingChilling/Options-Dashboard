@@ -48,9 +48,27 @@ def test_zero_vendor_gamma_is_recalculated_from_iv() -> None:
     assert (enriched["gamma_source"] == "modelled from IV").all()
 
 
+def test_zero_vendor_greeks_and_iv_are_recovered_from_option_prices() -> None:
+    chain = sample_chain()
+    chain[["iv", "gamma", "delta"]] = 0.0
+    enriched = enrich_chain(chain, STANDARD)
+    assert (enriched["iv_used"] > 0).all()
+    assert (enriched["iv_source"] == "derived from option price").all()
+    assert (enriched["gamma_used"] > 0).all()
+    assert (enriched["delta_used"].abs() > 0).all()
+
+
+def test_all_zero_gamma_curve_does_not_create_fake_flip() -> None:
+    curve = pd.DataFrame(
+        {"spot": [80.0, 90.0, 100.0, 110.0], "net_gex": [0.0, 0.0, 0.0, 0.0]}
+    )
+    assert find_gamma_flip(curve, 100.0) is None
+
+
 def test_vendor_gamma_is_fallback_when_iv_is_missing() -> None:
     chain = sample_chain()
     chain["iv"] = float("nan")
+    chain[["bid", "ask"]] = float("nan")
     enriched = enrich_chain(chain, STANDARD)
     assert enriched["gamma_used"].tolist() == chain["gamma"].tolist()
     assert (enriched["gamma_source"] == "vendor fallback").all()
