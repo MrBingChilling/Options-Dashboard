@@ -5,6 +5,7 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 
 from src.marketdata_client import MarketDataClient
+from src.expiration_filters import FILTER_MONTHLY, FILTER_OVER_ONE_YEAR, resolve_expiration_filter
 
 
 EASTERN = ZoneInfo("America/New_York")
@@ -71,3 +72,31 @@ def test_http_402_retries_provider_latest_closed_session() -> None:
     assert client.session.get.call_count == 2
     assert client.session.get.call_args_list[0].kwargs["params"]["date"] == "2026-07-31"
     assert client.session.get.call_args_list[1].kwargs["params"]["date"] == "2026-07-30"
+
+
+def test_monthly_filter_uses_provider_monthly_parameter() -> None:
+    selection = resolve_expiration_filter(FILTER_MONTHLY)
+    assert selection.request_params(date(2026, 7, 30)) == {
+        "expiration": "all",
+        "monthly": "true",
+    }
+
+
+def test_over_one_year_filter_has_open_ended_start_date() -> None:
+    selection = resolve_expiration_filter(FILTER_OVER_ONE_YEAR)
+    assert selection.request_params(date(2026, 7, 30)) == {"from": "2027-07-31"}
+
+
+def test_stock_candles_payload_is_normalized() -> None:
+    payload = {
+        "s": "ok",
+        "t": [1785369600, 1785456000],
+        "o": [100.0, 101.0],
+        "h": [102.0, 103.0],
+        "l": [99.0, 100.0],
+        "c": [101.0, 102.0],
+        "v": [1000, 1100],
+    }
+    candles = MarketDataClient._payload_to_candles(payload)
+    assert candles.columns.tolist() == ["time", "open", "high", "low", "close", "volume"]
+    assert candles["close"].tolist() == [101.0, 102.0]

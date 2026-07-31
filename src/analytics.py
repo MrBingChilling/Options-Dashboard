@@ -12,7 +12,8 @@ import pandas as pd
 STANDARD = "Standard: calls + / puts -"
 DEALERS_SHORT_ALL = "Dealers short all options"
 DEALERS_LONG_ALL = "Dealers long all options"
-ASSUMPTIONS = (STANDARD, DEALERS_SHORT_ALL, DEALERS_LONG_ALL)
+CUSTOM_WEIGHTS = "Custom dealer weights"
+ASSUMPTIONS = (STANDARD, DEALERS_SHORT_ALL, DEALERS_LONG_ALL, CUSTOM_WEIGHTS)
 CONTRACT_MULTIPLIER = 100.0
 
 
@@ -35,12 +36,20 @@ class PositioningSummary:
     min_dte: int
     max_dte: int
     assumption: str
+    expiration_filter: str
+    dealer_call_weight: float
+    dealer_put_weight: float
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
-def assumption_signs(sides: pd.Series, assumption: str) -> np.ndarray:
+def assumption_weights(
+    sides: pd.Series,
+    assumption: str,
+    call_weight: float = -0.40,
+    put_weight: float = -0.70,
+) -> np.ndarray:
     sides = sides.astype(str).str.lower().to_numpy()
     if assumption == STANDARD:
         return np.where(sides == "call", 1.0, -1.0)
@@ -48,6 +57,33 @@ def assumption_signs(sides: pd.Series, assumption: str) -> np.ndarray:
         return np.full(len(sides), -1.0)
     if assumption == DEALERS_LONG_ALL:
         return np.full(len(sides), 1.0)
+    if assumption == CUSTOM_WEIGHTS:
+        if not -1.0 <= call_weight <= 1.0 or not -1.0 <= put_weight <= 1.0:
+            raise ValueError("Dealer weights must be between -1 and +1.")
+        return np.where(sides == "call", call_weight, put_weight)
+    raise ValueError(f"Unknown dealer assumption: {assumption}")
+
+
+def assumption_signs(sides: pd.Series, assumption: str) -> np.ndarray:
+    """Backward-compatible alias for the original fixed-sign assumptions."""
+    return assumption_weights(sides, assumption)
+
+
+def weights_for_assumption(
+    assumption: str,
+    call_weight: float = -0.40,
+    put_weight: float = -0.70,
+) -> tuple[float, float]:
+    if assumption == STANDARD:
+        return 1.0, -1.0
+    if assumption == DEALERS_SHORT_ALL:
+        return -1.0, -1.0
+    if assumption == DEALERS_LONG_ALL:
+        return 1.0, 1.0
+    if assumption == CUSTOM_WEIGHTS:
+        if not -1.0 <= call_weight <= 1.0 or not -1.0 <= put_weight <= 1.0:
+            raise ValueError("Dealer weights must be between -1 and +1.")
+        return float(call_weight), float(put_weight)
     raise ValueError(f"Unknown dealer assumption: {assumption}")
 
 
@@ -239,12 +275,19 @@ def enrich_chain(
     assumption: str,
     risk_free_rate: float = 0.04,
     dividend_yield: float = 0.0,
+    call_weight: float = -0.40,
+    put_weight: float = -0.70,
 ) -> pd.DataFrame:
     if chain.empty:
         raise ValueError("The option chain is empty.")
     frame = chain.copy()
     spot = float(frame["underlyingPrice"].dropna().median())
-    signs = assumption_signs(frame["side"], assumption)
+    dealer_weights = assumption_weights(
+        frame["side"],
+        assumption,
+        call_weight=call_weight,
+        put_weight=put_weight,
+    )
     vendor_iv = pd.to_numeric(frame["iv"], errors="coerce").to_numpy(float)
     valid_vendor_iv = np.isfinite(vendor_iv) & (vendor_iv > 0)
     derived_iv = np.full(len(frame), np.nan, dtype=float)
@@ -303,7 +346,7 @@ def enrich_chain(
         model_delta,
         np.where(np.isfinite(vendor_delta), vendor_delta, 0.0),
     )
-    frame["dealer_sign"] = signs
+    frame["dealer_weight"] = dealer_weights
     frame["iv_used"] = volatility
     frame["iv_source"] = np.select(
         [valid_vendor_iv, valid_derived_iv],
@@ -322,20 +365,20 @@ def enrich_chain(
         "modelled from IV",
         np.where(np.isfinite(vendor_delta), "vendor fallback", "unavailable"),
     )
-    frame["gex"] = (
+    frame["base_gex"] = (
         gamma
         * frame["openInterest"].to_numpy(float)
         * CONTRACT_MULTIPLIER
         * spot**2
         * 0.01
-        * signs
     )
+    frame["gex"] = frame["base_gex"] * dealer_weights
     frame["delta_exposure"] = (
         delta
         * frame["openInterest"].to_numpy(float)
         * CONTRACT_MULTIPLIER
         * spot
-        * signs
+        * dealer_weights
     )
     return frame
 
@@ -348,6 +391,8 @@ def gamma_curve(
     lower_pct: float = 0.70,
     upper_pct: float = 1.30,
     points: int = 121,
+    call_weight: float = -0.40,
+    put_weight: float = -0.70,
 ) -> pd.DataFrame:
     spot = float(chain["underlyingPrice"].dropna().median())
     price_grid = np.linspace(spot * lower_pct, spot * upper_pct, points)
@@ -359,7 +404,12 @@ def gamma_curve(
     weights = (
         chain["openInterest"].to_numpy(float)
         * CONTRACT_MULTIPLIER
-        * assumption_signs(chain["side"], assumption)
+        * assumption_weights(
+            chain["side"],
+            assumption,
+            call_weight=call_weight,
+            put_weight=put_weight,
+        )
     )
     weights = np.where(valid_iv, weights, 0.0)
 
@@ -406,10 +456,15 @@ def find_gamma_flip(curve: pd.DataFrame, current_spot: float) -> float | None:
 def strike_profile(enriched: pd.DataFrame) -> pd.DataFrame:
     grouped = (
         enriched.groupby(["strike", "side"], as_index=False)
-        .agg(gex=("gex", "sum"), open_interest=("openInterest", "sum"), volume=("volume", "sum"))
+        .agg(
+            gex=("gex", "sum"),
+            base_gex=("base_gex", "sum"),
+            open_interest=("openInterest", "sum"),
+            volume=("volume", "sum"),
+        )
     )
     pieces: list[pd.DataFrame] = []
-    for metric in ("gex", "open_interest", "volume"):
+    for metric in ("gex", "base_gex", "open_interest", "volume"):
         pivot = grouped.pivot(index="strike", columns="side", values=metric).fillna(0)
         pivot = pivot.rename(columns={"call": f"call_{metric}", "put": f"put_{metric}"})
         pieces.append(pivot)
@@ -417,6 +472,8 @@ def strike_profile(enriched: pd.DataFrame) -> pd.DataFrame:
     for column in (
         "call_gex",
         "put_gex",
+        "call_base_gex",
+        "put_base_gex",
         "call_open_interest",
         "put_open_interest",
         "call_volume",
@@ -425,6 +482,7 @@ def strike_profile(enriched: pd.DataFrame) -> pd.DataFrame:
         if column not in profile:
             profile[column] = 0.0
     profile["net_gex"] = profile["call_gex"] + profile["put_gex"]
+    profile["total_gex"] = profile["call_gex"].abs() + profile["put_gex"].abs()
     return profile.sort_values("strike").reset_index(drop=True)
 
 
@@ -438,6 +496,7 @@ def expiration_profile(enriched: pd.DataFrame) -> pd.DataFrame:
         if column not in pivot:
             pivot[column] = 0.0
     pivot["net_gex"] = pivot["call_gex"] + pivot["put_gex"]
+    pivot["total_gex"] = pivot["call_gex"].abs() + pivot["put_gex"].abs()
     return pivot.sort_values("expiration_date")
 
 
@@ -449,6 +508,9 @@ def summarize(
     assumption: str,
     min_dte: int,
     max_dte: int,
+    expiration_filter: str | None = None,
+    call_weight: float = -0.40,
+    put_weight: float = -0.70,
 ) -> PositioningSummary:
     spot = float(enriched["underlyingPrice"].dropna().median())
     profile = strike_profile(enriched)
@@ -457,20 +519,26 @@ def summarize(
     call_oi = int(call_rows["openInterest"].sum())
     put_oi = int(put_rows["openInterest"].sum())
     gross_gex = float(enriched["gex"].abs().sum())
-    if not np.isfinite(gross_gex) or gross_gex <= 1e-6:
+    base_gex = float(enriched["base_gex"].abs().sum())
+    if not np.isfinite(base_gex) or base_gex <= 1e-6:
         raise ValueError(
             "No usable gamma exposure could be calculated from this chain. "
             "The provider returned no valid IV/Greeks and the option quotes could not be used to derive them."
         )
-    if profile["call_gex"].abs().max() <= 1e-6 or profile["put_gex"].abs().max() <= 1e-6:
+    if profile["call_base_gex"].abs().max() <= 1e-6 or profile["put_base_gex"].abs().max() <= 1e-6:
         raise ValueError("The chain does not contain usable gamma exposure for both calls and puts.")
     call_wall = float(
-        profile.loc[profile["call_gex"].abs().idxmax(), "strike"]
+        profile.loc[profile["call_base_gex"].abs().idxmax(), "strike"]
     )
     put_wall = float(
-        profile.loc[profile["put_gex"].abs().idxmax(), "strike"]
+        profile.loc[profile["put_base_gex"].abs().idxmax(), "strike"]
     )
     flip = find_gamma_flip(curve, spot)
+    resolved_call_weight, resolved_put_weight = weights_for_assumption(
+        assumption,
+        call_weight=call_weight,
+        put_weight=put_weight,
+    )
     return PositioningSummary(
         symbol=symbol.upper(),
         snapshot_date=snapshot_date.isoformat(),
@@ -489,6 +557,9 @@ def summarize(
         min_dte=min_dte,
         max_dte=max_dte,
         assumption=assumption,
+        expiration_filter=expiration_filter or f"Custom {min_dte}–{max_dte} DTE",
+        dealer_call_weight=resolved_call_weight,
+        dealer_put_weight=resolved_put_weight,
     )
 
 
@@ -498,7 +569,15 @@ def snapshot_record(
 ) -> dict[str, Any]:
     record = summary.to_dict()
     compact = profile[
-        ["strike", "call_gex", "put_gex", "net_gex", "call_open_interest", "put_open_interest"]
+        [
+            "strike",
+            "call_gex",
+            "put_gex",
+            "net_gex",
+            "total_gex",
+            "call_open_interest",
+            "put_open_interest",
+        ]
     ].copy()
     record["strike_profile"] = compact.round(4).to_dict(orient="records")
     return record

@@ -17,11 +17,40 @@ create table if not exists public.options_snapshots (
     min_dte integer not null,
     max_dte integer not null,
     assumption text not null,
+    expiration_filter text not null default 'Custom 7–365 DTE',
+    dealer_call_weight double precision not null default 1.0,
+    dealer_put_weight double precision not null default -1.0,
     strike_profile jsonb not null default '[]'::jsonb,
-    created_at timestamptz not null default now(),
-    constraint options_snapshots_unique_model
-        unique (symbol, snapshot_date, min_dte, max_dte, assumption)
+    created_at timestamptz not null default now()
 );
+
+alter table public.options_snapshots
+    add column if not exists expiration_filter text not null default 'Custom 7–365 DTE',
+    add column if not exists dealer_call_weight double precision not null default 1.0,
+    add column if not exists dealer_put_weight double precision not null default -1.0;
+
+alter table public.options_snapshots
+    drop constraint if exists options_snapshots_unique_model;
+
+do $$
+begin
+    if not exists (
+        select 1
+        from pg_constraint
+        where conname = 'options_snapshots_unique_model_v2'
+    ) then
+        alter table public.options_snapshots
+            add constraint options_snapshots_unique_model_v2
+            unique (
+                symbol,
+                snapshot_date,
+                expiration_filter,
+                assumption,
+                dealer_call_weight,
+                dealer_put_weight
+            );
+    end if;
+end $$;
 
 create index if not exists options_snapshots_symbol_date_idx
     on public.options_snapshots (symbol, snapshot_date desc);
@@ -31,3 +60,25 @@ revoke all on table public.options_snapshots from anon, authenticated;
 
 comment on table public.options_snapshots is
     'Private daily summaries and strike profiles for the options positioning dashboard. Accessed server-side with a secret key.';
+
+create table if not exists public.stock_candles (
+    id bigint generated always as identity primary key,
+    symbol text not null,
+    session_date date not null,
+    open double precision not null,
+    high double precision not null,
+    low double precision not null,
+    close double precision not null,
+    volume bigint,
+    created_at timestamptz not null default now(),
+    constraint stock_candles_symbol_date_unique unique (symbol, session_date)
+);
+
+create index if not exists stock_candles_symbol_date_idx
+    on public.stock_candles (symbol, session_date desc);
+
+alter table public.stock_candles enable row level security;
+revoke all on table public.stock_candles from anon, authenticated;
+
+comment on table public.stock_candles is
+    'Private split-adjusted daily OHLCV candles cached for dashboard price overlays.';

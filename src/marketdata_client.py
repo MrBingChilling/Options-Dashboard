@@ -9,6 +9,12 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 import requests
 
+from src.expiration_filters import (
+    ExpirationSelection,
+    custom_expiration_selection,
+    resolve_expiration_filter,
+)
+
 
 EASTERN = ZoneInfo("America/New_York")
 NUMERIC_COLUMNS = {
@@ -79,12 +85,16 @@ class MarketDataClient:
         min_dte: int = 7,
         max_dte: int = 365,
         min_open_interest: int = 1,
+        expiration_filter: str | None = None,
     ) -> ChainResult:
         symbol = symbol.strip().upper()
         if not symbol or not symbol.replace(".", "").replace("-", "").isalnum():
             raise ValueError("Enter a valid US ticker symbol.")
-        if min_dte < 0 or max_dte <= min_dte:
-            raise ValueError("Maximum DTE must be greater than minimum DTE.")
+        selection = (
+            resolve_expiration_filter(expiration_filter)
+            if expiration_filter
+            else custom_expiration_selection(min_dte, max_dte)
+        )
 
         candidate_date = analysis_date
         last_error: str | None = None
@@ -93,8 +103,7 @@ class MarketDataClient:
                 payload = self._request_chain(
                     symbol,
                     candidate_date,
-                    min_dte,
-                    max_dte,
+                    selection,
                     min_open_interest,
                 )
             except _LatestAvailableSession as exc:
@@ -127,17 +136,15 @@ class MarketDataClient:
         self,
         symbol: str,
         snapshot_date: date,
-        min_dte: int,
-        max_dte: int,
+        expiration_selection: ExpirationSelection,
         min_open_interest: int,
     ) -> dict[str, Any]:
         params = {
             "date": snapshot_date.isoformat(),
-            "from": (snapshot_date + timedelta(days=min_dte)).isoformat(),
-            "to": (snapshot_date + timedelta(days=max_dte)).isoformat(),
             "minOpenInterest": min_open_interest,
             "nonstandard": "false",
         }
+        params.update(expiration_selection.request_params(snapshot_date))
         response = self.session.get(
             f"{self.BASE_URL}/options/chain/{symbol}/",
             params=params,
@@ -153,6 +160,63 @@ class MarketDataClient:
             return response.json()
         except requests.JSONDecodeError as exc:
             raise MarketDataError("MarketData.app returned an invalid JSON response.") from exc
+
+    def fetch_candles(
+        self,
+        symbol: str,
+        from_date: date,
+        to_date: date,
+        resolution: str = "D",
+    ) -> pd.DataFrame:
+        symbol = symbol.strip().upper()
+        if not symbol or not symbol.replace(".", "").replace("-", "").isalnum():
+            raise ValueError("Enter a valid US ticker symbol.")
+        if from_date > to_date:
+            raise ValueError("Price-history start date must not be after its end date.")
+        response = self.session.get(
+            f"{self.BASE_URL}/stocks/candles/{resolution}/{symbol}/",
+            params={
+                "from": from_date.isoformat(),
+                "to": to_date.isoformat(),
+                "adjustsplits": "true",
+            },
+            timeout=self.timeout,
+        )
+        if response.status_code not in {200, 203}:
+            raise MarketDataError(
+                f"MarketData.app price history returned HTTP {response.status_code}: "
+                f"{self._error_detail(response)}"
+            )
+        try:
+            payload = response.json()
+        except requests.JSONDecodeError as exc:
+            raise MarketDataError("MarketData.app returned invalid price-history JSON.") from exc
+        if payload.get("s") != "ok":
+            raise MarketDataError(payload.get("errmsg") or "No price candles were found.")
+        return self._payload_to_candles(payload)
+
+    @staticmethod
+    def _payload_to_candles(payload: dict[str, Any]) -> pd.DataFrame:
+        required = ("t", "o", "h", "l", "c", "v")
+        if any(not isinstance(payload.get(column), list) for column in required):
+            raise MarketDataError("The price-history response is missing OHLCV fields.")
+        lengths = {len(payload[column]) for column in required}
+        if len(lengths) != 1:
+            raise MarketDataError("The price-history response contains misaligned fields.")
+        frame = pd.DataFrame(
+            {
+                "time": pd.to_datetime(payload["t"], unit="s", utc=True)
+                .tz_convert(EASTERN)
+                .tz_localize(None),
+                "open": pd.to_numeric(payload["o"], errors="coerce"),
+                "high": pd.to_numeric(payload["h"], errors="coerce"),
+                "low": pd.to_numeric(payload["l"], errors="coerce"),
+                "close": pd.to_numeric(payload["c"], errors="coerce"),
+                "volume": pd.to_numeric(payload["v"], errors="coerce"),
+            }
+        )
+        frame = frame.dropna(subset=["time", "open", "high", "low", "close"])
+        return frame.sort_values("time").drop_duplicates("time").reset_index(drop=True)
 
     @staticmethod
     def _error_detail(response: requests.Response) -> str:

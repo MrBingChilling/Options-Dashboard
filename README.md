@@ -2,15 +2,19 @@
 
 A private, mobile-friendly Streamlit dashboard for slower-moving US equity and ETF options positioning. It uses MarketData.app end-of-day option chains, saves daily summaries to Supabase, and can collect a watchlist automatically with GitHub Actions.
 
-## What the first version includes
+## What this version includes
 
-- Gamma exposure by strike and expiration
+- Seven expiration filters: 21–60, 61–120, 121–240, 241–365, over one year, standard monthly only, and all expirations
+- Gamma exposure by strike and separate net/absolute-total gamma charts by expiration
 - Modelled gamma flip across a 70%–130% underlying-price range
 - Call wall and put wall
-- Net and gross gamma exposure per 1% underlying move
+- Net and absolute-total gamma exposure per 1% underlying move
 - Put/call open-interest ratio and net delta exposure
-- Explicit dealer-position assumption selector
-- Daily history for spot, flip, walls, net GEX, and put/call OI
+- Fixed assumptions plus adjustable call/put dealer weights from −1 to +1
+- Split-adjusted daily price candles cached in Supabase
+- Price/history overlays for spot, flip, walls, net GEX, and put/call OI
+- A large price-and-gamma map with candlestick/line modes and two right-side gamma-profile layouts
+- TradingView Lightweight Charts interactions across all analytical charts: mouse/touch panning, wheel/pinch zoom, crosshairs, and tappable series controls
 - CSV export of the filtered chain
 - Responsive layout for desktop and phone browsers
 - Optional scheduled snapshots after each US market session
@@ -21,9 +25,9 @@ If the requested date is not yet available on an EOD-only MarketData.app plan, t
 
 ## 1. Create the Supabase table
 
-1. Open your Supabase project.
+1. Open your Supabase project. If you already deployed the earlier version, repeat these steps once; the script safely adds the new columns and price-candle table.
 2. Go to **SQL Editor** and create a new query.
-3. Paste all of [`supabase_schema.sql`](supabase_schema.sql) and run it once.
+3. Paste all of [`supabase_schema.sql`](supabase_schema.sql) and run it. This creates or upgrades `options_snapshots` and creates `stock_candles`.
 4. Open **Connect** (or **Integrations → Data API**) and copy the Project URL.
 5. In **Project Settings → API Keys**, copy the `sb_secret_...` value shown under **Secret keys**.
 
@@ -92,11 +96,27 @@ In the GitHub repository:
    - `SUPABASE_SECRET_KEY`
 3. Add these repository variables:
    - `WATCHLIST` — comma-separated, for example `SPY,QQQ,NVDA,MSFT`
-   - `MIN_DTE` — `7`
-   - `MAX_DTE` — `365`
+   - `EXPIRATION_FILTER` — use one exact value from the list below; if omitted, the workflow uses `All expirations`
+   - `DEALER_ASSUMPTION` — optional; defaults to `Standard: calls + / puts -`
+   - `DEALER_CALL_WEIGHT` — optional; used by `Custom dealer weights`, for example `-0.40`
+   - `DEALER_PUT_WEIGHT` — optional; used by `Custom dealer weights`, for example `-0.70`
 4. Go to **Actions → Save daily options snapshots → Run workflow** once to test it.
 
+Valid `EXPIRATION_FILTER` values are:
+
+```text
+21–60 DTE
+61–120 DTE
+121–240 DTE
+241–365 DTE
+Over one year
+Monthly expirations only
+All expirations
+```
+
 Start with a short watchlist and check MarketData.app credit usage before expanding it. Scheduled jobs upsert the same ticker/date/model combination, so rerunning a day does not create duplicates.
+
+The collector also saves that session's daily price candle. When the interactive app first needs a longer price chart, it requests up to five years of daily candles once and caches them in `stock_candles`; later chart toggles reuse those rows.
 
 ## Model definitions
 
@@ -115,8 +135,23 @@ This produces estimated dollar gamma exposure for a 1% underlying move. Historic
 - **Standard: calls + / puts −** is the common public-dashboard convention and can produce a gamma flip.
 - **Dealers short all options** assigns both calls and puts negative gamma. Because every contract has the same gamma sign, a zero crossing normally does not exist.
 - **Dealers long all options** assigns both sides positive gamma and likewise normally has no flip.
+- **Custom dealer weights** applies separate call and put weights from −1 to +1:
+
+  ```text
+  Scenario GEX = call weight × call gamma exposure + put weight × put gamma exposure
+  ```
+
+  `−1` means entirely short, `0` neutral, and `+1` entirely long for that category.
 
 Open interest does not identify the owner or trade direction. These modes are sensitivity tests, not observed dealer books.
+
+### Price data and chart engine
+
+- Price charts use MarketData.app's split-adjusted daily stock-candle endpoint, not a TradingView Essential subscription or an IBKR session.
+- TradingView Essential does not expose a private datafeed API for combining hosted TradingView data with this dashboard's Supabase gamma series.
+- The interface uses the open-source TradingView Lightweight Charts engine. It is only the chart renderer; MarketData.app and Supabase remain the data sources.
+- The pinned chart-engine file and its license are bundled under `static/`, so the deployed app does not depend on a public JavaScript CDN.
+- Changing candlestick/line mode, gamma-profile layout, visible period, chart layers, or dealer weights does not call the options API again.
 
 ### Walls and flip
 
@@ -133,7 +168,9 @@ app.py                         Streamlit interface
 src/analytics.py               GEX, walls, flip, profiles, summaries
 src/marketdata_client.py       MarketData.app historical-chain client
 src/storage.py                 Private Supabase snapshot storage
-src/charts.py                  Plotly charts
+src/charts.py                  TradingView Lightweight Charts renderer
+src/expiration_filters.py      Expiration presets and API parameters
+static/                        Bundled chart engine and license
 scripts/daily_snapshot.py      Scheduled watchlist collector
 .github/workflows/             GitHub Actions schedule
 supabase_schema.sql            Database setup

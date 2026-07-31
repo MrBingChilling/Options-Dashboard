@@ -4,6 +4,7 @@ import pandas as pd
 import pytest
 
 from src.analytics import (
+    CUSTOM_WEIGHTS,
     DEALERS_SHORT_ALL,
     STANDARD,
     enrich_chain,
@@ -96,3 +97,73 @@ def test_profile_and_summary_are_consistent() -> None:
     assert summary.call_wall in {90.0, 110.0}
     assert summary.put_wall in {90.0, 110.0}
     assert summary.put_call_oi_ratio == 2100 / 1800
+
+
+def test_custom_dealer_weights_and_absolute_total_gamma() -> None:
+    enriched = enrich_chain(
+        sample_chain(),
+        CUSTOM_WEIGHTS,
+        call_weight=-0.40,
+        put_weight=-0.70,
+    )
+    assert (enriched.loc[enriched["side"] == "call", "dealer_weight"] == -0.40).all()
+    assert (enriched.loc[enriched["side"] == "put", "dealer_weight"] == -0.70).all()
+
+    profile = strike_profile(enriched)
+    assert profile["total_gex"].tolist() == pytest.approx(
+        (profile["call_gex"].abs() + profile["put_gex"].abs()).tolist()
+    )
+
+    curve = gamma_curve(
+        enriched,
+        CUSTOM_WEIGHTS,
+        call_weight=-0.40,
+        put_weight=-0.70,
+    )
+    summary = summarize(
+        "xyz",
+        date(2026, 7, 30),
+        enriched,
+        curve,
+        CUSTOM_WEIGHTS,
+        61,
+        120,
+        expiration_filter="61–120 DTE",
+        call_weight=-0.40,
+        put_weight=-0.70,
+    )
+    assert summary.expiration_filter == "61–120 DTE"
+    assert summary.dealer_call_weight == -0.40
+    assert summary.dealer_put_weight == -0.70
+
+
+def test_zero_custom_weights_are_a_valid_neutral_scenario() -> None:
+    enriched = enrich_chain(
+        sample_chain(),
+        CUSTOM_WEIGHTS,
+        call_weight=0.0,
+        put_weight=0.0,
+    )
+    curve = gamma_curve(
+        enriched,
+        CUSTOM_WEIGHTS,
+        call_weight=0.0,
+        put_weight=0.0,
+    )
+    summary = summarize(
+        "xyz",
+        date(2026, 7, 30),
+        enriched,
+        curve,
+        CUSTOM_WEIGHTS,
+        21,
+        60,
+        expiration_filter="21–60 DTE",
+        call_weight=0.0,
+        put_weight=0.0,
+    )
+    assert summary.net_gex == 0.0
+    assert summary.gross_gex == 0.0
+    assert summary.gamma_flip is None
+    assert summary.call_wall in {90.0, 110.0}
+    assert summary.put_wall in {90.0, 110.0}

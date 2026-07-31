@@ -7,6 +7,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from src.analytics import ASSUMPTIONS, STANDARD, enrich_chain, gamma_curve, snapshot_record, strike_profile, summarize
+from src.expiration_filters import EXPIRATION_FILTERS, custom_expiration_selection, resolve_expiration_filter
 from src.marketdata_client import MarketDataClient
 from src.storage import SnapshotStore
 
@@ -31,6 +32,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-dte", type=int, default=env_int("MAX_DTE", 365))
     parser.add_argument("--min-open-interest", type=int, default=env_int("MIN_OPEN_INTEREST", 1))
     parser.add_argument("--assumption", default=env_text("DEALER_ASSUMPTION", STANDARD), choices=ASSUMPTIONS)
+    parser.add_argument(
+        "--expiration-filter",
+        default=os.getenv("EXPIRATION_FILTER", "").strip() or None,
+        choices=EXPIRATION_FILTERS,
+    )
+    parser.add_argument("--dealer-call-weight", type=float, default=float(env_text("DEALER_CALL_WEIGHT", "-0.40")))
+    parser.add_argument("--dealer-put-weight", type=float, default=float(env_text("DEALER_PUT_WEIGHT", "-0.70")))
     parser.add_argument("--risk-free-rate", type=float, default=float(env_text("RISK_FREE_RATE", "0.04")))
     parser.add_argument("--dividend-yield", type=float, default=float(env_text("DIVIDEND_YIELD", "0.0")))
     return parser.parse_args()
@@ -60,18 +68,28 @@ def main() -> int:
                 min_dte=args.min_dte,
                 max_dte=args.max_dte,
                 min_open_interest=args.min_open_interest,
+                expiration_filter=args.expiration_filter,
+            )
+            selection = (
+                resolve_expiration_filter(args.expiration_filter)
+                if args.expiration_filter
+                else custom_expiration_selection(args.min_dte, args.max_dte)
             )
             enriched = enrich_chain(
                 result.data,
                 args.assumption,
                 risk_free_rate=args.risk_free_rate,
                 dividend_yield=args.dividend_yield,
+                call_weight=args.dealer_call_weight,
+                put_weight=args.dealer_put_weight,
             )
             curve = gamma_curve(
                 enriched,
                 args.assumption,
                 risk_free_rate=args.risk_free_rate,
                 dividend_yield=args.dividend_yield,
+                call_weight=args.dealer_call_weight,
+                put_weight=args.dealer_put_weight,
             )
             profile = strike_profile(enriched)
             summary = summarize(
@@ -80,10 +98,18 @@ def main() -> int:
                 enriched,
                 curve,
                 args.assumption,
-                args.min_dte,
-                args.max_dte,
+                selection.min_dte,
+                selection.max_dte,
+                expiration_filter=selection.label,
+                call_weight=args.dealer_call_weight,
+                put_weight=args.dealer_put_weight,
             )
             store.save(snapshot_record(summary, profile))
+            try:
+                candles = client.fetch_candles(symbol, result.snapshot_date, result.snapshot_date)
+                store.save_candles(symbol, candles)
+            except Exception as candle_exc:
+                print(f"Price candle warning for {symbol}: {candle_exc}", file=sys.stderr)
             print(f"Saved {symbol} snapshot for {result.snapshot_date.isoformat()} ({len(enriched):,} contracts).")
         except Exception as exc:  # keep processing the remainder of the watchlist
             failures += 1
