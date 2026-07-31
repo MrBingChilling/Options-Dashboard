@@ -40,6 +40,10 @@ def test_price_gamma_chart_contains_candles_history_and_profile() -> None:
     )
     assert spec["series"][0]["type"] == "candlestick"
     assert len(spec["gammaProfile"]) == 3
+    assert spec["primaryPriceScale"] == "left"
+    assert spec["leftScale"] is True
+    assert spec["rightScale"] is False
+    assert spec["series"][0]["options"]["priceScaleId"] == "left"
     assert {series["name"] for series in spec["series"]} >= {
         "Price",
         "Gamma flip",
@@ -83,3 +87,5 @@ def test_chart_document_uses_lightweight_charts_and_touch_controls() -> None:
     assert "Chart rendering error:" in document
     assert "horzTouchDrag: true" in document
     assert "pinch: true" in document
+    assert "Gamma: stacked ←" in document
+    assert "axis-callW-putW" in document

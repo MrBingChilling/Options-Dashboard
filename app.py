@@ -528,7 +528,10 @@ with overview_tab:
         ),
         height=680,
     )
-    st.caption("The right-side gamma profile is drawn from the loaded option chain. Chart controls do not request the options API again.")
+    st.caption(
+        "The price scale is fixed on the left and the gamma profile is drawn on the right from the loaded option chain. "
+        "Chart controls do not request the options API again."
+    )
 
 with expiry_tab:
     net_column, total_column = st.columns(2)

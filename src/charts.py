@@ -249,6 +249,10 @@ def price_gamma_chart(
     latest_price_updated: Any | None = None,
     title: str = "Price action and options positioning",
 ) -> dict[str, Any]:
+    has_gamma_profile = profile is not None and not profile.empty
+    # Keep the composite chart's price labels away from the gamma overlay.
+    # History charts without a profile retain the conventional right scale.
+    primary_price_scale = "left" if has_gamma_profile else "right"
     candle_rows = []
     line_rows = []
     for row in candles.itertuples(index=False):
@@ -288,7 +292,7 @@ def price_gamma_chart(
             borderDownColor=PUT_COLOR,
             wickUpColor=CALL_COLOR,
             wickDownColor=PUT_COLOR,
-            priceScaleId="right",
+            priceScaleId=primary_price_scale,
             role="price",
         )
     ]
@@ -304,7 +308,7 @@ def price_gamma_chart(
                 lineVisible=False,
                 priceLineVisible=True,
                 lastValueVisible=True,
-                priceScaleId="right",
+                priceScaleId=primary_price_scale,
             )
         )
     if show_levels and not history.empty:
@@ -321,7 +325,7 @@ def price_gamma_chart(
                     "line",
                     lineWidth=2,
                     lineStyle=style,
-                    priceScaleId="right",
+                    priceScaleId=primary_price_scale,
                 )
             )
     if show_regime and not history.empty:
@@ -349,7 +353,7 @@ def price_gamma_chart(
             ]
         )
     gamma_profile = []
-    if profile is not None and not profile.empty:
+    if has_gamma_profile:
         for row in profile.itertuples(index=False):
             gamma_profile.append(
                 {
@@ -364,6 +368,9 @@ def price_gamma_chart(
         "series": series,
         "gammaProfile": gamma_profile,
         "gammaMode": gamma_mode,
+        "primaryPriceScale": primary_price_scale,
+        "leftScale": primary_price_scale == "left",
+        "rightScale": primary_price_scale == "right",
         "priceScaleMargins": {"top": 0.05, "bottom": 0.30 if show_regime else 0.08},
     }
 
@@ -438,7 +445,7 @@ def _chart_document(payload: str) -> str:
       layout: {{ background: {{ color: '#0E1525' }}, textColor: '#A8B3C7', fontSize: 11 }},
       grid: {{ vertLines: {{ color: 'rgba(139,151,173,.07)' }}, horzLines: {{ color: 'rgba(139,151,173,.10)' }} }},
       crosshair: {{ mode: LightweightCharts.CrosshairMode.Normal, vertLine: {{ color: '#60708F', labelBackgroundColor: '#27344E' }}, horzLine: {{ color: '#60708F', labelBackgroundColor: '#27344E' }} }},
-      rightPriceScale: {{ borderColor: '#2B3752', scaleMargins: spec.priceScaleMargins || {{ top: .08, bottom: .08 }} }},
+      rightPriceScale: {{ visible: spec.rightScale !== false, borderColor: '#2B3752', scaleMargins: spec.priceScaleMargins || {{ top: .08, bottom: .08 }} }},
       leftPriceScale: {{ visible: !!spec.leftScale, borderColor: '#2B3752' }},
       timeScale: {{ borderColor: '#2B3752', timeVisible: false, rightOffset: (spec.gammaProfile || []).length ? 18 : 3, barSpacing: 8, minBarSpacing: 2, tickMarkFormatter: (time) => labels[keyOf(time)] || keyOf(time).slice(5) }},
       handleScroll: {{ mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: true }},
@@ -471,7 +478,8 @@ def _chart_document(payload: str) -> str:
       legend.appendChild(button);
     }};
     (spec.series || []).forEach(addSeries);
-    if (spec.priceScaleMargins) chart.priceScale('right').applyOptions({{ scaleMargins: spec.priceScaleMargins }});
+    const primaryPriceScale = spec.primaryPriceScale || 'right';
+    if (spec.priceScaleMargins) chart.priceScale(primaryPriceScale).applyOptions({{ scaleMargins: spec.priceScaleMargins }});
     chart.timeScale().fitContent();
 
     const tip = document.getElementById('tip');
@@ -484,7 +492,8 @@ def _chart_document(payload: str) -> str:
 
     const profile = spec.gammaProfile || [];
     const gammaLabel = document.getElementById('gamma-label');
-    gammaLabel.textContent = profile.length ? (spec.gammaMode === 'Stacked together' ? 'Gamma: stacked →' : 'Calls ←  |  Puts →') : '';
+    gammaLabel.textContent = profile.length ? (spec.gammaMode === 'Stacked together' ? 'Gamma: stacked ←' : 'Calls ←  |  Puts →') : '';
+    gammaLabel.style.right = spec.rightScale === false ? '10px' : '52px';
     gammaLabel.style.display = profile.length ? 'block' : 'none';
     const overlay = document.createElement('canvas'); overlay.className = 'gamma-canvas'; host.appendChild(overlay);
     const drawGamma = () => {{
@@ -492,14 +501,15 @@ def _chart_document(payload: str) -> str:
       const dpr = window.devicePixelRatio || 1, w = host.clientWidth, h = host.clientHeight;
       overlay.width = Math.round(w*dpr); overlay.height = Math.round(h*dpr); overlay.style.width = `${{w}}px`; overlay.style.height = `${{h}}px`;
       const ctx = overlay.getContext('2d'); ctx.scale(dpr,dpr); ctx.clearRect(0,0,w,h);
-      const scaleWidth = chart.priceScale('right').width(); const plotRight = w - scaleWidth - 4;
+      const rightScaleWidth = spec.rightScale === false ? 0 : chart.priceScale('right').width();
+      const plotRight = w - rightScaleWidth - 6;
       const profileWidth = Math.min(210, Math.max(100, w * .24)); const stacked = spec.gammaMode === 'Stacked together';
       const maxValue = Math.max(...profile.map(x => stacked ? x.call + x.put : Math.max(x.call, x.put)), 1e-9);
       const coords = profile.map(x => priceApi.priceToCoordinate(x.strike)).filter(x => x !== null && Number.isFinite(x)).sort((a,b)=>a-b);
       let barHeight = 6; if (coords.length > 1) {{ const gaps = coords.slice(1).map((x,i)=>x-coords[i]).filter(x=>x>0); if (gaps.length) barHeight = Math.max(2, Math.min(14, Math.min(...gaps)*.72)); }}
       profile.forEach(row => {{
         const y = priceApi.priceToCoordinate(row.strike); if (y === null || y < 0 || y > h) return;
-        if (stacked) {{ const axis = plotRight-profileWidth; const callW=row.call/maxValue*profileWidth, putW=row.put/maxValue*profileWidth; ctx.fillStyle='rgba(54,211,153,.72)'; ctx.fillRect(axis,y-barHeight/2,callW,barHeight); ctx.fillStyle='rgba(251,113,133,.72)'; ctx.fillRect(axis+callW,y-barHeight/2,putW,barHeight); }}
+        if (stacked) {{ const axis = plotRight; const callW=row.call/maxValue*profileWidth, putW=row.put/maxValue*profileWidth; ctx.fillStyle='rgba(54,211,153,.72)'; ctx.fillRect(axis-callW,y-barHeight/2,callW,barHeight); ctx.fillStyle='rgba(251,113,133,.72)'; ctx.fillRect(axis-callW-putW,y-barHeight/2,putW,barHeight); }}
         else {{ const half=profileWidth/2, axis=plotRight-half; const callW=row.call/maxValue*half, putW=row.put/maxValue*half; ctx.fillStyle='rgba(54,211,153,.72)'; ctx.fillRect(axis-callW,y-barHeight/2,callW,barHeight); ctx.fillStyle='rgba(251,113,133,.72)'; ctx.fillRect(axis,y-barHeight/2,putW,barHeight); ctx.strokeStyle='rgba(168,179,199,.30)'; ctx.beginPath(); ctx.moveTo(axis,y-barHeight/2); ctx.lineTo(axis,y+barHeight/2); ctx.stroke(); }}
       }});
     }};

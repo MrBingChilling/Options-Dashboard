@@ -13,7 +13,7 @@ A private, mobile-friendly Streamlit dashboard for slower-moving US equity and E
 - Fixed assumptions plus adjustable call/put dealer weights from −1 to +1
 - Split-adjusted daily price candles cached in Supabase, with a separate real-time stock-price overlay
 - Price/history overlays for spot, flip, walls, net GEX, and put/call OI
-- A large price-and-gamma map with candlestick/line modes and two right-side gamma-profile layouts
+- A large price-and-gamma map with candlestick/line modes, a left-side price scale, and two right-side gamma-profile layouts (stacked bars face left)
 - TradingView Lightweight Charts interactions across all analytical charts: mouse/touch panning, wheel/pinch zoom, crosshairs, and tappable series controls
 - CSV export of the filtered chain
 - Responsive layout for desktop and phone browsers
