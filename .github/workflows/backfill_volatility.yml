@@ -20,6 +20,16 @@ on:
         required: false
         default: "1W,1M,3M,6M"
         type: string
+      max_requests:
+        description: "Max missing ticker-day MarketData requests this run (0 = unlimited)"
+        required: false
+        default: "1000"
+        type: string
+      credit_reserve:
+        description: "Stop when reported remaining MarketData credits reach this level (0 = disable)"
+        required: false
+        default: "500"
+        type: string
 
 permissions:
   contents: read
@@ -38,6 +48,7 @@ jobs:
       - name: Backfill volatility history
         shell: bash
         env:
+          PYTHONUNBUFFERED: "1"
           MARKETDATA_TOKEN: ${{ secrets.MARKETDATA_TOKEN }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
@@ -46,10 +57,14 @@ jobs:
           START_DATE: ${{ inputs.start_date }}
           END_DATE: ${{ inputs.end_date }}
           TENORS: ${{ inputs.tenors }}
+          MAX_REQUESTS: ${{ inputs.max_requests }}
+          CREDIT_RESERVE: ${{ inputs.credit_reserve }}
         run: |
           SYMBOLS="${INPUT_SYMBOLS:-$WATCHLIST}"
           python -m scripts.backfill_volatility \
             --symbols "$SYMBOLS" \
             --start "$START_DATE" \
             --end "$END_DATE" \
-            --tenors "$TENORS"
+            --tenors "$TENORS" \
+            --max-requests "$MAX_REQUESTS" \
+            --credit-reserve "$CREDIT_RESERVE"

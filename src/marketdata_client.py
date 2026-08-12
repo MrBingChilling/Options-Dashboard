@@ -101,6 +101,7 @@ class MarketDataClient:
         max_dte: int = 365,
         min_open_interest: int = 1,
         expiration_filter: str | None = None,
+        delta_filter: str | None = None,
     ) -> ChainResult:
         symbol = symbol.strip().upper()
         if not symbol or not symbol.replace(".", "").replace("-", "").isalnum():
@@ -120,6 +121,7 @@ class MarketDataClient:
                     candidate_date,
                     selection,
                     min_open_interest,
+                    delta_filter=delta_filter,
                 )
             except _LatestAvailableSession as exc:
                 last_error = str(exc)
@@ -153,6 +155,7 @@ class MarketDataClient:
         snapshot_date: date,
         expiration_selection: ExpirationSelection,
         min_open_interest: int,
+        delta_filter: str | None = None,
     ) -> dict[str, Any]:
         params = {
             "date": snapshot_date.isoformat(),
@@ -160,6 +163,8 @@ class MarketDataClient:
             "nonstandard": "false",
         }
         params.update(expiration_selection.request_params(snapshot_date))
+        if delta_filter:
+            params["delta"] = delta_filter
         response = self.session.get(
             f"{self.BASE_URL}/options/chain/{symbol}/",
             params=params,
