@@ -10,6 +10,8 @@ from src.analytics import ASSUMPTIONS, STANDARD, enrich_chain, gamma_curve, snap
 from src.expiration_filters import EXPIRATION_FILTERS, custom_expiration_selection, resolve_expiration_filter
 from src.marketdata_client import MarketDataClient
 from src.storage import SnapshotStore
+from src.volatility import TENORS, snapshot_from_chain
+from src.volatility_storage import save_volatility_snapshot
 
 
 EASTERN = ZoneInfo("America/New_York")
@@ -106,12 +108,36 @@ def main() -> int:
                 put_weight=args.dealer_put_weight,
             )
             store.save(snapshot_record(summary, profile))
+
+            volatility_saved = 0
+            for tenor, target_dte in TENORS.items():
+                if target_dte < selection.min_dte or target_dte > selection.max_dte:
+                    continue
+                try:
+                    volatility = snapshot_from_chain(
+                        symbol,
+                        result.data,
+                        result.snapshot_date,
+                        tenor,
+                        target_dte=target_dte,
+                    )
+                    save_volatility_snapshot(store, volatility)
+                    volatility_saved += 1
+                except Exception as volatility_exc:
+                    print(
+                        f"IV/skew warning for {symbol} {tenor}: {volatility_exc}",
+                        file=sys.stderr,
+                    )
+
             try:
                 candles = client.fetch_candles(symbol, result.snapshot_date, result.snapshot_date)
                 store.save_candles(symbol, candles)
             except Exception as candle_exc:
                 print(f"Price candle warning for {symbol}: {candle_exc}", file=sys.stderr)
-            print(f"Saved {symbol} snapshot for {result.snapshot_date.isoformat()} ({len(enriched):,} contracts).")
+            print(
+                f"Saved {symbol} snapshot for {result.snapshot_date.isoformat()} "
+                f"({len(enriched):,} contracts; {volatility_saved} IV/skew tenors)."
+            )
         except Exception as exc:  # keep processing the remainder of the watchlist
             failures += 1
             print(f"Failed {symbol}: {exc}", file=sys.stderr)
