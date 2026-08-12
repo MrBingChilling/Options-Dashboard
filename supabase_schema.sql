@@ -83,5 +83,32 @@ revoke all on table public.stock_candles from anon, authenticated;
 comment on table public.stock_candles is
     'Private split-adjusted daily OHLCV candles cached for dashboard price overlays.';
 
+create table if not exists public.volatility_snapshots (
+    id bigint generated always as identity primary key,
+    symbol text not null,
+    snapshot_date date not null,
+    tenor text not null,
+    target_dte integer not null,
+    actual_dte integer not null,
+    expiration date not null,
+    spot double precision not null,
+    atm_iv double precision,
+    call_25d_iv double precision,
+    put_25d_iv double precision,
+    skew_25d double precision,
+    created_at timestamptz not null default now(),
+    constraint volatility_snapshots_symbol_date_tenor_unique
+        unique (symbol, snapshot_date, tenor)
+);
+
+create index if not exists volatility_snapshots_symbol_tenor_date_idx
+    on public.volatility_snapshots (symbol, tenor, snapshot_date desc);
+
+alter table public.volatility_snapshots enable row level security;
+revoke all on table public.volatility_snapshots from anon, authenticated;
+
+comment on table public.volatility_snapshots is
+    'Private constant-tenor ATM IV, 25-delta call/put IV, and call-minus-put skew history.';
+
 -- Make newly created tables and constraints visible to Supabase's REST API immediately.
 notify pgrst, 'reload schema';
