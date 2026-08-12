@@ -7,8 +7,12 @@ from typing import Iterable
 import numpy as np
 import pandas as pd
 
+from src.analytics import black_scholes_delta, derive_implied_volatility
+
 
 TENORS = {"1W": 7, "1M": 30, "3M": 90, "6M": 180}
+DEFAULT_RISK_FREE_RATE = 0.04
+DEFAULT_DIVIDEND_YIELD = 0.0
 
 
 @dataclass(frozen=True)
@@ -41,12 +45,13 @@ def _finite(value: object) -> float | None:
 
 
 def _closest_row(frame: pd.DataFrame, column: str, target: float) -> pd.Series | None:
-    if frame.empty or column not in frame.columns:
+    if frame.empty or column not in frame.columns or "iv_used" not in frame.columns:
         return None
     work = frame.copy()
     work[column] = pd.to_numeric(work[column], errors="coerce")
-    work = work.dropna(subset=[column, "iv"])
-    work = work[pd.to_numeric(work["iv"], errors="coerce") > 0]
+    work["iv_used"] = pd.to_numeric(work["iv_used"], errors="coerce")
+    work = work.dropna(subset=[column, "iv_used"])
+    work = work[work["iv_used"] > 0]
     if work.empty:
         return None
     index = (work[column] - target).abs().idxmin()
@@ -59,7 +64,7 @@ def _atm_iv(expiry_chain: pd.DataFrame, spot: float) -> float | None:
         side_frame = expiry_chain[expiry_chain["side"] == side]
         row = _closest_row(side_frame, "strike", spot)
         if row is not None:
-            value = _finite(row.get("iv"))
+            value = _finite(row.get("iv_used"))
             if value is not None and value > 0:
                 values.append(value)
     return float(np.mean(values)) if values else None
@@ -67,11 +72,78 @@ def _atm_iv(expiry_chain: pd.DataFrame, spot: float) -> float | None:
 
 def _delta_iv(expiry_chain: pd.DataFrame, side: str, target_delta: float) -> float | None:
     side_frame = expiry_chain[expiry_chain["side"] == side]
-    row = _closest_row(side_frame, "delta", target_delta)
+    row = _closest_row(side_frame, "delta_used", target_delta)
     if row is None:
         return None
-    value = _finite(row.get("iv"))
+    value = _finite(row.get("iv_used"))
     return value if value is not None and value > 0 else None
+
+
+def _prepare_expiry_chain(
+    work: pd.DataFrame,
+    target: int,
+) -> tuple[pd.DataFrame, pd.Timestamp, int, float]:
+    dte_by_expiry = work.groupby("expiration", as_index=False)["dte"].median()
+    if dte_by_expiry.empty:
+        raise ValueError("The chain has no usable expiration data.")
+
+    expiry_row = dte_by_expiry.loc[(dte_by_expiry["dte"] - target).abs().idxmin()]
+    expiration_ts = pd.Timestamp(expiry_row["expiration"])
+    actual_dte = int(round(float(expiry_row["dte"])))
+    expiry_chain = work[work["expiration"] == expiry_row["expiration"]].copy()
+    if expiry_chain.empty:
+        raise ValueError("The selected expiration has no usable contracts.")
+
+    spot = float(pd.to_numeric(expiry_chain["underlyingPrice"], errors="coerce").median())
+    if not np.isfinite(spot) or spot <= 0:
+        raise ValueError("The chain has no usable underlying price.")
+
+    vendor_iv = pd.to_numeric(expiry_chain.get("iv"), errors="coerce").to_numpy(float)
+    valid_vendor_iv = np.isfinite(vendor_iv) & (vendor_iv > 0)
+    iv_used = vendor_iv.copy()
+    missing_iv = ~valid_vendor_iv
+    if missing_iv.any():
+        derived = derive_implied_volatility(
+            expiry_chain.loc[missing_iv],
+            spot,
+            DEFAULT_RISK_FREE_RATE,
+            DEFAULT_DIVIDEND_YIELD,
+        )
+        iv_used[missing_iv] = derived
+
+    valid_iv = np.isfinite(iv_used) & (iv_used > 0)
+    if not valid_iv.any():
+        raise ValueError(
+            "The chain has no usable IV data and IV could not be derived from option prices."
+        )
+    expiry_chain["iv_used"] = iv_used
+
+    model_delta = black_scholes_delta(
+        spot,
+        pd.to_numeric(expiry_chain["strike"], errors="coerce").to_numpy(float),
+        pd.to_numeric(expiry_chain["dte"], errors="coerce").to_numpy(float) / 365.0,
+        iv_used,
+        expiry_chain["side"].astype(str).to_numpy(),
+        DEFAULT_RISK_FREE_RATE,
+        DEFAULT_DIVIDEND_YIELD,
+    )
+    vendor_delta = pd.to_numeric(expiry_chain.get("delta"), errors="coerce").to_numpy(float)
+    side_values = expiry_chain["side"].astype(str).str.lower().to_numpy()
+    valid_vendor_delta = (
+        np.isfinite(vendor_delta)
+        & (
+            ((side_values == "call") & (vendor_delta > 0) & (vendor_delta <= 1))
+            | ((side_values == "put") & (vendor_delta < 0) & (vendor_delta >= -1))
+        )
+    )
+    valid_model_delta = valid_iv & np.isfinite(model_delta)
+    expiry_chain["delta_used"] = np.where(
+        valid_vendor_delta,
+        vendor_delta,
+        np.where(valid_model_delta, model_delta, np.nan),
+    )
+
+    return expiry_chain, expiration_ts, actual_dte, spot
 
 
 def snapshot_from_chain(
@@ -88,20 +160,26 @@ def snapshot_from_chain(
     target = int(target_dte if target_dte is not None else TENORS[tenor])
 
     work = chain.copy()
-    for column in ("dte", "strike", "iv", "delta", "underlyingPrice"):
+    for column in (
+        "dte",
+        "strike",
+        "iv",
+        "delta",
+        "underlyingPrice",
+        "bid",
+        "ask",
+        "mid",
+        "last",
+    ):
         if column in work.columns:
             work[column] = pd.to_numeric(work[column], errors="coerce")
-    work = work.dropna(subset=["dte", "expiration", "strike", "iv", "underlyingPrice"])
-    work = work[work["iv"] > 0]
+    work = work.dropna(subset=["dte", "expiration", "strike", "underlyingPrice"])
+    work = work[work["side"].astype(str).str.lower().isin(["call", "put"])]
+    work["side"] = work["side"].astype(str).str.lower()
     if work.empty:
-        raise ValueError("The chain has no contracts with usable IV data.")
+        raise ValueError("The chain has no usable contracts for IV/skew.")
 
-    dte_by_expiry = work.groupby("expiration", as_index=False)["dte"].median()
-    expiry_row = dte_by_expiry.loc[(dte_by_expiry["dte"] - target).abs().idxmin()]
-    expiration_ts = pd.Timestamp(expiry_row["expiration"])
-    actual_dte = int(round(float(expiry_row["dte"])))
-    expiry_chain = work[work["expiration"] == expiry_row["expiration"]].copy()
-    spot = float(expiry_chain["underlyingPrice"].median())
+    expiry_chain, expiration_ts, actual_dte, spot = _prepare_expiry_chain(work, target)
 
     atm = _atm_iv(expiry_chain, spot)
     call_iv = _delta_iv(expiry_chain, "call", 0.25)
