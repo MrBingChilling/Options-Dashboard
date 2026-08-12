@@ -1,0 +1,55 @@
+name: Backfill IV and skew history
+
+on:
+  workflow_dispatch:
+    inputs:
+      symbols:
+        description: "Comma-separated tickers (blank uses WATCHLIST)"
+        required: false
+        type: string
+      start_date:
+        description: "Start date YYYY-MM-DD"
+        required: true
+        type: string
+      end_date:
+        description: "End date YYYY-MM-DD"
+        required: true
+        type: string
+      tenors:
+        description: "Comma-separated tenors: 1W,1M,3M,6M"
+        required: false
+        default: "1W,1M,3M,6M"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Backfill volatility history
+        shell: bash
+        env:
+          MARKETDATA_TOKEN: ${{ secrets.MARKETDATA_TOKEN }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+          WATCHLIST: ${{ vars.WATCHLIST }}
+          INPUT_SYMBOLS: ${{ inputs.symbols }}
+          START_DATE: ${{ inputs.start_date }}
+          END_DATE: ${{ inputs.end_date }}
+          TENORS: ${{ inputs.tenors }}
+        run: |
+          SYMBOLS="${INPUT_SYMBOLS:-$WATCHLIST}"
+          python -m scripts.backfill_volatility \
+            --symbols "$SYMBOLS" \
+            --start "$START_DATE" \
+            --end "$END_DATE" \
+            --tenors "$TENORS"
