@@ -23,6 +23,18 @@ def _store() -> SnapshotStore:
     )
 
 
+def _symbols() -> list[str]:
+    raw = os.environ.get("SKEW_SYMBOLS", "").strip()
+    if not raw:
+        return list(AUTO_SYMBOLS)
+    requested = [
+        value.strip().upper()
+        for value in raw.replace("\n", ",").replace(" ", ",").split(",")
+        if value.strip()
+    ]
+    return list(dict.fromkeys(requested))
+
+
 def _completed_symbols(
     store: SnapshotStore,
     symbols: list[str],
@@ -57,17 +69,18 @@ def _fetch_and_save(
 ):
     print(
         f"[request] {symbol} date={requested_date} "
-        "delta=0.25 DTE=0..45 (one request for 1W + 1M)",
+        "DTE=0..45 range=otm strikeLimit=30; local IV/delta; one request for 1W + 1M",
         flush=True,
     )
 
-    result = client.fetch_chain(
-        symbol,
-        requested_date,
-        min_dte=0,
-        max_dte=45,
-        min_open_interest=0,
-        delta_filter="0.25",
+    result = client.fetch_skew_chain(symbol, requested_date)
+
+    vendor_iv = pd.to_numeric(result.data.get("iv"), errors="coerce")
+    usable_vendor_iv = int((vendor_iv.notna() & (vendor_iv > 0)).sum())
+    print(
+        f"[chain] {symbol} rows={len(result.data)} "
+        f"vendor_iv_usable={usable_vendor_iv}/{len(result.data)}",
+        flush=True,
     )
 
     snapshots = skew_snapshots_from_chain(
@@ -95,7 +108,9 @@ def main() -> int:
         raise SystemExit("Supabase is not configured.")
 
     client = MarketDataClient(token)
-    symbols = list(AUTO_SYMBOLS)
+    symbols = _symbols()
+    if not symbols:
+        raise SystemExit("No skew symbols were configured.")
     requested_date = previous_weekday(datetime.now(EASTERN).date())
 
     print(
@@ -111,13 +126,13 @@ def main() -> int:
 
     if len(completed) == len(symbols):
         print(
-            "All automatic symbols already have 1W + 1M rows for "
+            "All configured symbols already have 1W + 1M rows for "
             f"{requested_date}. MarketData requests: 0.",
             flush=True,
         )
         return 0
 
-    probe = "SPY"
+    probe = "SPY" if "SPY" in symbols else symbols[0]
     actual_session = requested_date
     attempted: set[str] = set()
     successes = 0
@@ -126,9 +141,7 @@ def main() -> int:
     if probe not in completed:
         attempted.add(probe)
         try:
-            actual_session = _fetch_and_save(
-                client, store, probe, requested_date
-            )
+            actual_session = _fetch_and_save(client, store, probe, requested_date)
             successes += 1
         except (MarketDataError, SnapshotStoreError, ValueError) as exc:
             failures.append(f"{probe}: {exc}")
@@ -165,12 +178,9 @@ def main() -> int:
 
     for index, symbol in enumerate(missing, start=1):
         attempted.add(symbol)
-        print(
-            f"[{index}/{len(missing)}] collecting {symbol}",
-            flush=True,
-        )
+        print(f"[{index}/{len(missing)}] collecting {symbol}", flush=True)
         try:
-            _fetch_and_save(client, store, symbol, requested_date)
+            _fetch_and_save(client, store, symbol, actual_session)
             successes += 1
         except (MarketDataError, SnapshotStoreError, ValueError) as exc:
             failures.append(f"{symbol}: {exc}")
@@ -184,8 +194,6 @@ def main() -> int:
     if failures:
         print("\n".join(failures), flush=True)
 
-    # Surface a completely broken collector as a failed Action, but don't throw
-    # away partial success when one or two illiquid symbols fail.
     return 1 if successes == 0 else 0
 
 
