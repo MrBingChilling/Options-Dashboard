@@ -33,6 +33,17 @@ def skew_metric_bar_chart(
     symbol_order = data["symbol_label"].tolist()
     height = min(1500, max(470, 30 * len(data)))
 
+    values = pd.to_numeric(data["display_value"], errors="coerce").dropna()
+    if values.empty:
+        domain_min, domain_max = -1.0, 1.0
+    else:
+        raw_min = min(0.0, float(values.min()))
+        raw_max = max(0.0, float(values.max()))
+        span = max(raw_max - raw_min, 1.0)
+        edge_pad = span * 0.012
+        domain_min = raw_min - (edge_pad if raw_min < 0 else 0.0)
+        domain_max = raw_max + (edge_pad if raw_max > 0 else 0.0)
+
     present_groups = [
         group for group in preset_color_order if group in set(data["preset_group"])
     ]
@@ -54,7 +65,12 @@ def skew_metric_bar_chart(
     ]
 
     base = alt.Chart(data).encode(
-        x=alt.X("zero:Q", title=axis_title, axis=alt.Axis(format=".1f")),
+        x=alt.X(
+            "zero:Q",
+            title=axis_title,
+            axis=alt.Axis(format=".1f"),
+            scale=alt.Scale(domain=[domain_min, domain_max], nice=False, zero=False),
+        ),
         x2=alt.X2("display_value:Q"),
         y=alt.Y(
             "symbol_label:N",
