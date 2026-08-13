@@ -55,10 +55,22 @@ PRESET_COLORS = {
     "Custom": "#8992A8",
 }
 REFERENCE_COLORS = {"SPY": "#7AB8FF", "QQQ": "#70D39A", "Pool avg": "#F4C45E"}
-HISTORY_COLORS = [
-    "#5B8FF9", "#61DDAA", "#F6BD16", "#7262FD", "#78D3F8", "#F6903D", "#008685",
-    "#F08BB4", "#6DC8EC", "#B8E986", "#E8684A", "#9270CA", "#FF9D4D", "#269A99",
-]
+HISTORY_METRIC_COLUMNS = {
+    "25Δ Skew": "skew_25d",
+    "25Δ Call IV": "call_25d_iv",
+    "25Δ Put IV": "put_25d_iv",
+}
+HISTORY_METRIC_SHORT = {
+    "25Δ Skew": "Skew",
+    "25Δ Call IV": "Call IV",
+    "25Δ Put IV": "Put IV",
+}
+HISTORY_METRIC_PALETTES = {
+    "Skew": ["#C084FC", "#E879F9", "#A78BFA", "#F472B6", "#D946EF", "#8B5CF6", "#FB7185", "#D8B4FE"],
+    "Call IV": ["#60A5FA", "#38BDF8", "#22D3EE", "#818CF8", "#3B82F6", "#06B6D4", "#93C5FD", "#67E8F9"],
+    "Put IV": ["#34D399", "#2DD4BF", "#A3E635", "#4ADE80", "#14B8A6", "#84CC16", "#6EE7B7", "#5EEAD4"],
+}
+SERIES_SEPARATOR = " · "
 PRIMARY_PRESET_BY_SYMBOL: dict[str, str] = {}
 for group in PRESET_COLOR_ORDER:
     if group != "Custom":
@@ -75,28 +87,60 @@ def history_start(period: str, end_date: date) -> date | None:
     return end_date - timedelta(days=days[period]) if period in days else None
 
 
-def display_series(history: pd.DataFrame, metric: str, change_mode: str) -> tuple[pd.DataFrame, str]:
-    column = {"25Δ Call IV": "call_25d_iv", "25Δ Put IV": "put_25d_iv", "25Δ Skew": "skew_25d"}[metric]
-    work = history[["snapshot_date", "symbol", column]].dropna().copy()
-    work["value"] = work[column] * 100.0
-    work = work.sort_values(["symbol", "snapshot_date"])
+def display_series(history: pd.DataFrame, metrics: list[str], change_mode: str) -> tuple[pd.DataFrame, str]:
+    frames: list[pd.DataFrame] = []
+    for metric in metrics:
+        column = HISTORY_METRIC_COLUMNS[metric]
+        work = history[["snapshot_date", "symbol", column]].dropna().copy()
+        if work.empty:
+            continue
+        work["value"] = work[column] * 100.0
+        work = work.sort_values(["symbol", "snapshot_date"])
+        if change_mode != "Level":
+            work["value"] = work.groupby("symbol")["value"].diff({"1D Δ": 1, "1W Δ": 5, "1M Δ": 21}[change_mode])
+        work["series_label"] = work["symbol"].astype(str) + SERIES_SEPARATOR + HISTORY_METRIC_SHORT[metric]
+        frames.append(work[["snapshot_date", "series_label", "value"]])
+
+    if not frames:
+        return pd.DataFrame(), "Change (vol points)" if change_mode != "Level" else "IV / skew (vol points)"
+
+    combined = pd.concat(frames, ignore_index=True)
     if change_mode != "Level":
-        work["value"] = work.groupby("symbol")["value"].diff({"1D Δ": 1, "1W Δ": 5, "1M Δ": 21}[change_mode])
         ylabel = "Change (vol points)"
-    elif metric == "25Δ Skew":
+    elif len(metrics) > 1:
+        ylabel = "IV / skew (vol points)"
+    elif metrics[0] == "25Δ Skew":
         ylabel = "25Δ call IV − 25Δ put IV (vol points)"
     else:
         ylabel = "Implied volatility (%)"
-    return work.pivot(index="snapshot_date", columns="symbol", values="value").sort_index(), ylabel
+    return combined.pivot(index="snapshot_date", columns="series_label", values="value").sort_index(), ylabel
+
+
+def historical_series_colors(series: pd.DataFrame) -> dict[str, str]:
+    tickers: list[str] = []
+    for label in series.columns:
+        ticker = str(label).split(SERIES_SEPARATOR, 1)[0]
+        if ticker not in tickers:
+            tickers.append(ticker)
+    ticker_rank = {ticker: i for i, ticker in enumerate(tickers)}
+
+    colors: dict[str, str] = {}
+    for label in series.columns:
+        text = str(label)
+        ticker, metric_short = text.split(SERIES_SEPARATOR, 1) if SERIES_SEPARATOR in text else (text, "Call IV")
+        palette = HISTORY_METRIC_PALETTES.get(metric_short, HISTORY_METRIC_PALETTES["Call IV"])
+        colors[text] = palette[ticker_rank.get(ticker, 0) % len(palette)]
+    return colors
 
 
 def historical_tradingview_config(series: pd.DataFrame) -> list[dict[str, object]]:
     dense = len(series.columns) > 10
     show_price_labels = len(series.columns) <= 8
+    colors = historical_series_colors(series)
     series_config: list[dict[str, object]] = []
     dates = pd.to_datetime(series.index, errors="coerce")
-    for i, symbol in enumerate(series.columns):
-        values = pd.to_numeric(series[symbol], errors="coerce")
+    for label in series.columns:
+        values = pd.to_numeric(series[label], errors="coerce")
         data = [
             {"time": stamp.strftime("%Y-%m-%d"), "value": float(value)}
             for stamp, value in zip(dates, values)
@@ -110,12 +154,12 @@ def historical_tradingview_config(series: pd.DataFrame) -> list[dict[str, object
                 "type": "Line",
                 "data": data,
                 "options": {
-                    "color": HISTORY_COLORS[i % len(HISTORY_COLORS)],
+                    "color": colors[str(label)],
                     "lineWidth": 1 if dense else 2,
                     "lineVisible": not single_point,
                     "pointMarkersVisible": True,
                     "pointMarkersRadius": 2.5,
-                    "title": str(symbol) if show_price_labels else "",
+                    "title": str(label) if show_price_labels else "",
                     "lastValueVisible": show_price_labels,
                     "priceLineVisible": False,
                     "crosshairMarkerVisible": True,
@@ -160,19 +204,20 @@ def historical_tradingview_config(series: pd.DataFrame) -> list[dict[str, object
 
 
 def historical_color_key(series: pd.DataFrame) -> str:
+    colors = historical_series_colors(series)
     chips: list[str] = []
-    for i, symbol in enumerate(series.columns):
-        values = pd.to_numeric(series[symbol], errors="coerce").dropna()
+    for label in series.columns:
+        values = pd.to_numeric(series[label], errors="coerce").dropna()
         if values.empty:
             continue
-        color = HISTORY_COLORS[i % len(HISTORY_COLORS)]
-        safe_symbol = html.escape(str(symbol))
+        color = colors[str(label)]
+        safe_label = html.escape(str(label))
         latest = float(values.iloc[-1])
         chips.append(
             f'<span style="display:inline-flex;align-items:center;gap:5px;margin-right:6px;padding:4px 7px;'
             f'border:1px solid rgba(255,255,255,.12);border-radius:7px;font-size:11px;">'
             f'<span style="width:7px;height:7px;border-radius:50%;background:{color};display:inline-block;"></span>'
-            f'<b>{safe_symbol}</b><span style="color:#AEB8C9;">{latest:.2f}</span></span>'
+            f'<b>{safe_label}</b><span style="color:#AEB8C9;">{latest:.2f}</span></span>'
         )
     return (
         '<div style="overflow-x:auto;white-space:nowrap;padding:2px 0 7px;scrollbar-width:thin;">'
@@ -341,15 +386,14 @@ if edited != members:
     st.session_state[mk] = list(edited)
 
 selected = symbols_for_presets(display_presets)
-controls = st.columns([1, 1.25, 1.25, 1.6])
+controls = st.columns([1, 1.35, 1.8])
 tenor = controls[0].segmented_control("Tenor", list(DAILY_TENORS), default="1M") or "1M"
 sort_mode = controls[1].selectbox(
     "Cross-section sort",
     ["Rank (low → high)", "Alphabetical", "Preset", "Rank (High → low)"],
     help="Applies independently to the skew, put-IV and call-IV tables using each table's own displayed metric.",
 )
-history_period = controls[2].segmented_control("History", ["1M", "3M", "6M", "1Y", "Max"], default="6M") or "6M"
-manual_request = controls[3].button(
+manual_request = controls[2].button(
     "Request missing displayed from MarketData",
     type="primary",
     width="stretch",
@@ -430,15 +474,30 @@ else:
 
 st.divider()
 st.subheader("Historical 25Δ IV & skew")
-history_controls = st.columns([1.15, 1.15, 1.25, 2.45])
-metric = history_controls[0].selectbox("Metric", ["25Δ Skew", "25Δ Call IV", "25Δ Put IV"])
+history_controls = st.columns([1.55, 1.15, 1.45])
+metrics = history_controls[0].multiselect(
+    "Metric",
+    list(HISTORY_METRIC_COLUMNS),
+    default=["25Δ Call IV"],
+    key="iv_history_metrics",
+    help="Select one or multiple metrics. Each ticker/metric combination is plotted as a separate colored series.",
+)
 change_mode = history_controls[1].segmented_control(
     "View",
     ["Level", "1D Δ", "1W Δ", "1M Δ"],
     default="Level",
     help="Level shows the stored metric. 1D Δ is the change from the prior stored session; 1W Δ uses 5 stored observations; 1M Δ uses 21 stored observations.",
 ) or "Level"
-history_ticker_source = history_controls[2].segmented_control(
+history_period = history_controls[2].segmented_control(
+    "History",
+    ["1M", "3M", "6M", "1Y", "Max"],
+    default="6M",
+    key="iv_history_period",
+    help="Controls only the historical chart below.",
+) or "6M"
+
+history_ticker_controls = st.columns([1.2, 3.8])
+history_ticker_source = history_ticker_controls[0].segmented_control(
     "Tickers",
     ["Filtered", "Custom"],
     default="Filtered",
@@ -449,7 +508,7 @@ all_history_options = all_preset_symbols()
 
 if history_ticker_source == "Filtered":
     history_symbols = list(selected)
-    history_controls[3].markdown(
+    history_ticker_controls[1].markdown(
         f"**Historical tickers**  \nUsing all **{len(history_symbols)}** ticker(s) from the current Preset filter."
     )
 else:
@@ -462,14 +521,16 @@ else:
         st.session_state["iv_history_symbols"] = current_history or list(selected)
     elif st.session_state["iv_history_symbols"] != current_history:
         st.session_state["iv_history_symbols"] = current_history
-    history_symbols = history_controls[3].multiselect(
+    history_symbols = history_ticker_controls[1].multiselect(
         "Historical tickers",
         options=all_history_options,
         key="iv_history_symbols",
         help="Choose any ticker available in the dashboard presets. This only reads saved Supabase history and does not request MarketData.",
     )
 
-if store.enabled and history_symbols:
+if not metrics:
+    st.info("Select at least one historical metric.")
+elif store.enabled and history_symbols:
     end_date = datetime.now(EASTERN).date()
     try:
         hist = volatility_history(store, history_symbols, tenor, start_date=history_start(history_period, end_date), end_date=end_date)
@@ -479,7 +540,7 @@ if store.enabled and history_symbols:
     if hist.empty:
         st.info("No history is stored for this selection yet. Daily scheduled snapshots will build it automatically.")
     else:
-        chart_data, ylabel = display_series(hist, metric, change_mode)
+        chart_data, ylabel = display_series(hist, metrics, change_mode)
         if chart_data.dropna(how="all").empty:
             st.info("There are not enough saved observations for this change view yet.")
         else:
@@ -499,10 +560,14 @@ if store.enabled and history_symbols:
                 "Small dots mark each stored daily observation. Single-observation series render as a dot instead of a misleading horizontal line. "
                 "Drag the chart to pan; drag the right price scale vertically to stretch/compress Y; pinch or mouse-wheel to zoom; double-click/double-tap the scale to reset."
             )
+            st.caption(
+                "Colors identify both ticker and metric: Call IV uses blue/cyan shades, Put IV uses green/teal shades, and skew uses purple/pink shades. "
+                "The color key labels every series as TICKER · metric so the same ticker can be compared across multiple metrics."
+            )
             if len(chart_data.columns) > 8:
                 st.caption(
-                    "The color key above is horizontally scrollable so a large ticker basket does not cover the chart. "
-                    "For 8 or fewer tickers, TradingView also shows ticker/value labels directly on the price scale."
+                    "The color key above is horizontally scrollable so a large ticker/metric basket does not cover the chart. "
+                    "For 8 or fewer series, TradingView also shows ticker/metric labels directly on the price scale."
                 )
             st.caption(
                 "View: Level = the stored IV/skew value; 1D Δ = change versus the previous stored session; "
@@ -530,7 +595,9 @@ with st.expander("Method & API-credit behavior"):
 - **Daily basket:** Dashboard contains all **{len(AUTO_SYMBOLS)}** symbols run by the automatic daily task.
 - **Preset filter:** selecting one or multiple presets changes presentation only and consumes **0 MarketData credits**.
 - **Historical ticker source:** Filtered mirrors the main preset filter; Custom can display any saved dashboard ticker(s) independently.
-- **Historical chart:** uses TradingView Lightweight Charts v5. Small point markers show every stored observation; one-observation series are dots only instead of fake horizontal lines. Large baskets use a one-row scrollable color key; small baskets also show price-scale ticker labels. Native price/time scale dragging and pinch/mouse-wheel zoom are enabled.
+- **Historical metrics:** select one or several of 25Δ skew, call IV and put IV. Every ticker/metric combination is a separate series and uses a metric-specific color family.
+- **Historical range:** the 1M/3M/6M/1Y/Max selector sits with the historical chart because it does not affect the cross-section tables.
+- **Historical chart:** uses TradingView Lightweight Charts v5. Small point markers show every stored observation; one-observation series are dots only instead of fake horizontal lines. Large baskets use a one-row scrollable color key; small baskets also show price-scale ticker/metric labels. Native price/time scale dragging and pinch/mouse-wheel zoom are enabled.
 - **Historical View:** Level shows the stored value. 1D Δ compares with the prior stored session, 1W Δ with 5 stored sessions earlier, and 1M Δ with 21 stored sessions earlier.
 - **Cross-section sort:** the same control applies to all three bar tables; rank modes use each table's own metric.
 - **Daily tenors:** 1W and 1M target 7 and 30 DTE and use the available expiration closest to each target.
