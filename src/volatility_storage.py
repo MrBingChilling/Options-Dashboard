@@ -122,6 +122,14 @@ def volatility_history(
         "skew_25d",
     ):
         frame[column] = pd.to_numeric(frame[column], errors="coerce")
+
+    # A long-running backfill can insert rows while offset-based pagination is
+    # in progress. That can make the same logical row appear on adjacent pages
+    # even though the database key itself is unique. Deduplicate the read result
+    # so charts always receive one symbol/date/tenor observation.
+    frame = frame.drop_duplicates(
+        subset=["symbol", "snapshot_date", "tenor"], keep="last"
+    )
     return frame.sort_values(["snapshot_date", "symbol"]).reset_index(drop=True)
 
 
