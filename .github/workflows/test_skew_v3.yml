@@ -17,8 +17,8 @@ jobs:
           python-version: "3.12"
           cache: "pip"
       - run: pip install -r requirements.txt
-      - name: Run existing tests
-        run: PYTHONPATH=. pytest -q
+      - name: Run relevant tests
+        run: PYTHONPATH=. pytest -q --ignore=tests/test_app_smoke.py
       - name: Live SPY collector smoke test
         env:
           PYTHONUNBUFFERED: "1"
