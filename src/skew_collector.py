@@ -103,10 +103,20 @@ SOFTWARE_SYMBOLS = [
     "CRWD",
     "CRM",
     "NOW",
+    "NET",
+]
+
+POWER_SYMBOLS = [
+    "BE",
+    "GEV",
+    "HUBB",
+    "PWR",
+    "AGX",
+    "IESC",
 ]
 
 # Automatic daily basket. dict.fromkeys preserves the display order while
-# de-duplicating NVDA, which belongs to both the legacy AI pool and Mag 7.
+# de-duplicating symbols that belong to more than one preset.
 AUTO_SYMBOLS = list(
     dict.fromkeys(
         AI_POOL_SYMBOLS
@@ -114,6 +124,7 @@ AUTO_SYMBOLS = list(
         + NEOCLOUD_SYMBOLS
         + MAG7_SYMBOLS
         + SOFTWARE_SYMBOLS
+        + POWER_SYMBOLS
     )
 )
 
