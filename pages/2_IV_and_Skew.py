@@ -30,7 +30,7 @@ from src.storage import SnapshotStore, SnapshotStoreError
 from src.volatility_storage import latest_volatility, save_volatility_snapshots, volatility_history
 
 EASTERN = ZoneInfo("America/New_York")
-PRESET_STATE_VERSION = "2026-08-13-history-tv-v5"
+PRESET_STATE_VERSION = "2026-08-13-history-tv-v6"
 PRESET_DEFAULTS = {
     "Dashboard": AUTO_SYMBOLS,
     "Neoclouds": NEOCLOUD_SYMBOLS,
@@ -104,6 +104,7 @@ def historical_tradingview_config(series: pd.DataFrame) -> list[dict[str, object
         ]
         if not data:
             continue
+        single_point = len(data) == 1
         series_config.append(
             {
                 "type": "Line",
@@ -111,6 +112,9 @@ def historical_tradingview_config(series: pd.DataFrame) -> list[dict[str, object
                 "options": {
                     "color": HISTORY_COLORS[i % len(HISTORY_COLORS)],
                     "lineWidth": 1 if dense else 2,
+                    "lineVisible": not single_point,
+                    "pointMarkersVisible": True,
+                    "pointMarkersRadius": 2.5,
                     "title": str(symbol) if show_price_labels else "",
                     "lastValueVisible": show_price_labels,
                     "priceLineVisible": False,
@@ -492,6 +496,7 @@ if store.enabled and history_symbols:
             last_date = pd.to_datetime(chart_data.index.max()).date()
             st.caption(
                 f"Showing all {len(chart_data.index)} stored session(s) returned for the selected History range: {first_date} → {last_date}. "
+                "Small dots mark each stored daily observation. Single-observation series render as a dot instead of a misleading horizontal line. "
                 "Drag the chart to pan; drag the right price scale vertically to stretch/compress Y; pinch or mouse-wheel to zoom; double-click/double-tap the scale to reset."
             )
             if len(chart_data.columns) > 8:
@@ -525,7 +530,7 @@ with st.expander("Method & API-credit behavior"):
 - **Daily basket:** Dashboard contains all **{len(AUTO_SYMBOLS)}** symbols run by the automatic daily task.
 - **Preset filter:** selecting one or multiple presets changes presentation only and consumes **0 MarketData credits**.
 - **Historical ticker source:** Filtered mirrors the main preset filter; Custom can display any saved dashboard ticker(s) independently.
-- **Historical chart:** uses TradingView Lightweight Charts v5. Large baskets use a one-row scrollable color key; small baskets also show price-scale ticker labels. Native price/time scale dragging and pinch/mouse-wheel zoom are enabled.
+- **Historical chart:** uses TradingView Lightweight Charts v5. Small point markers show every stored observation; one-observation series are dots only instead of fake horizontal lines. Large baskets use a one-row scrollable color key; small baskets also show price-scale ticker labels. Native price/time scale dragging and pinch/mouse-wheel zoom are enabled.
 - **Historical View:** Level shows the stored value. 1D Δ compares with the prior stored session, 1W Δ with 5 stored sessions earlier, and 1M Δ with 21 stored sessions earlier.
 - **Cross-section sort:** the same control applies to all three bar tables; rank modes use each table's own metric.
 - **Daily tenors:** 1W and 1M target 7 and 30 DTE and use the available expiration closest to each target.
