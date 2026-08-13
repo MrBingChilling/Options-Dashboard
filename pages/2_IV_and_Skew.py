@@ -85,37 +85,75 @@ def display_series(history: pd.DataFrame, metric: str, change_mode: str) -> tupl
     return work.pivot(index="snapshot_date", columns="symbol", values="value").sort_index(), ylabel
 
 
-def historical_line_chart(series: pd.DataFrame, ylabel: str) -> go.Figure:
+def historical_y_range(series: pd.DataFrame, span_factor: float) -> list[float] | None:
+    values = pd.to_numeric(series.stack(), errors="coerce").dropna()
+    if values.empty:
+        return None
+    low = float(values.min())
+    high = float(values.max())
+    center = (low + high) / 2.0
+    span = high - low
+    if span <= 0:
+        span = max(abs(center) * 0.12, 1.0)
+    padded_half_span = max(span * 0.56, 0.5)
+    visible_half_span = padded_half_span * float(span_factor)
+    return [center - visible_half_span, center + visible_half_span]
+
+
+def historical_line_chart(
+    series: pd.DataFrame,
+    ylabel: str,
+    show_legend: bool,
+    y_span_factor: float,
+) -> go.Figure:
     fig = go.Figure()
+    dense = len(series.columns) > 12
     for symbol in series.columns:
         fig.add_trace(
             go.Scatter(
                 x=series.index,
                 y=series[symbol],
                 name=str(symbol),
-                mode="lines+markers",
+                mode="lines" if dense else "lines+markers",
                 connectgaps=False,
-                line={"width": 2},
-                marker={"size": 5},
+                line={"width": 1.5 if dense else 2},
+                marker={"size": 4},
                 hovertemplate=f"{symbol}<br>%{{x|%Y-%m-%d}}<br>%{{y:.2f}}<extra></extra>",
             )
         )
 
+    y_range = historical_y_range(series, y_span_factor)
+    yaxis = {
+        "title": ylabel,
+        "autorange": y_range is None,
+        "fixedrange": False,
+        "showgrid": True,
+        "gridcolor": "rgba(255,255,255,0.10)",
+        "zeroline": False,
+        "showspikes": True,
+        "spikemode": "across",
+        "spikesnap": "cursor",
+        "spikecolor": "rgba(255,255,255,0.55)",
+    }
+    if y_range is not None:
+        yaxis["range"] = y_range
+
     fig.update_layout(
         template="plotly_dark",
-        height=520,
-        margin={"l": 52, "r": 20, "t": 28, "b": 48},
+        height=590,
+        margin={"l": 54, "r": 18, "t": 42 if show_legend else 12, "b": 58},
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
-        hovermode="x unified",
+        hovermode="closest",
         dragmode="pan",
+        showlegend=show_legend,
         legend={
             "orientation": "h",
             "yanchor": "bottom",
             "y": 1.02,
             "xanchor": "left",
             "x": 0,
-            "font": {"size": 11},
+            "font": {"size": 10},
         },
         xaxis={
             "type": "date",
@@ -127,20 +165,9 @@ def historical_line_chart(series: pd.DataFrame, ylabel: str) -> go.Figure:
             "spikemode": "across",
             "spikesnap": "cursor",
             "spikecolor": "rgba(255,255,255,0.55)",
-            "rangeslider": {"visible": True, "thickness": 0.06},
+            "rangeslider": {"visible": True, "thickness": 0.055},
         },
-        yaxis={
-            "title": ylabel,
-            "autorange": True,
-            "fixedrange": False,
-            "showgrid": True,
-            "gridcolor": "rgba(255,255,255,0.10)",
-            "zeroline": False,
-            "showspikes": True,
-            "spikemode": "across",
-            "spikesnap": "cursor",
-            "spikecolor": "rgba(255,255,255,0.55)",
-        },
+        yaxis=yaxis,
     )
     return fig
 
@@ -433,6 +460,23 @@ else:
         help="Choose any ticker available in the dashboard presets. This only reads saved Supabase history and does not request MarketData.",
     )
 
+history_chart_controls = st.columns([2.4, 1.2])
+y_span_factor = history_chart_controls[0].slider(
+    "Y-axis span",
+    min_value=0.35,
+    max_value=4.0,
+    value=1.0,
+    step=0.15,
+    key="iv_history_y_span",
+    help="Lower than 1× magnifies the Y-axis (tighter range). Higher than 1× shrinks the plot vertically (wider range). 1× fits the displayed data with a small margin.",
+)
+show_history_legend = history_chart_controls[1].toggle(
+    "Show ticker legend",
+    value=False,
+    key="iv_history_show_legend",
+    help="Off by default so large filtered baskets do not consume the mobile chart area. Hover a line to identify its ticker.",
+)
+
 if store.enabled and history_symbols:
     end_date = datetime.now(EASTERN).date()
     try:
@@ -448,19 +492,24 @@ if store.enabled and history_symbols:
             st.info("There are not enough saved observations for this change view yet.")
         else:
             st.plotly_chart(
-                historical_line_chart(chart_data, ylabel),
+                historical_line_chart(chart_data, ylabel, show_history_legend, y_span_factor),
                 width="stretch",
                 config={
                     "scrollZoom": True,
                     "displaylogo": False,
                     "responsive": True,
+                    "doubleClick": "reset+autosize",
                     "modeBarButtonsToRemove": ["select2d", "lasso2d"],
                 },
             )
+            if len(history_symbols) > 12 and not show_history_legend:
+                st.caption(
+                    f"Legend hidden to preserve chart space for {len(history_symbols)} tickers. Hover the nearest line to see its ticker and value."
+                )
             st.caption(
                 ylabel
                 + f" · target tenor: {tenor} ({DAILY_TENORS[tenor]} DTE). "
-                + "Drag to pan, mouse-wheel/pinch to zoom, drag either axis to rescale, and use the modebar Autoscale/Reset controls."
+                + "Use the Y-axis span slider for fast vertical zoom; drag the chart to pan, pinch/mouse-wheel to zoom, or use the Plotly toolbar for zoom/autoscale/reset."
             )
             st.caption(
                 "View: Level = the stored IV/skew value; 1D Δ = change versus the previous stored session; "
@@ -488,6 +537,7 @@ with st.expander("Method & API-credit behavior"):
 - **Daily basket:** Dashboard contains all **{len(AUTO_SYMBOLS)}** symbols run by the automatic daily task.
 - **Preset filter:** selecting one or multiple presets changes presentation only and consumes **0 MarketData credits**.
 - **Historical ticker source:** Filtered mirrors the main preset filter; Custom can display any saved dashboard ticker(s) independently.
+- **Historical chart:** the ticker legend is hidden by default to preserve mobile chart space; the Y-axis span slider gives direct vertical magnification/shrink control.
 - **Historical View:** Level shows the stored value. 1D Δ compares with the prior stored session, 1W Δ with 5 stored sessions earlier, and 1M Δ with 21 stored sessions earlier.
 - **Cross-section sort:** the same control applies to all three bar tables; rank modes use each table's own metric.
 - **Daily tenors:** 1W and 1M target 7 and 30 DTE and use the available expiration closest to each target.
