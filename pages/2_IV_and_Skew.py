@@ -4,6 +4,7 @@ from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import pandas as pd
+import plotly.graph_objects as go
 import streamlit as st
 
 from src import skew_metric_bar_chart
@@ -28,7 +29,7 @@ from src.storage import SnapshotStore, SnapshotStoreError
 from src.volatility_storage import latest_volatility, save_volatility_snapshots, volatility_history
 
 EASTERN = ZoneInfo("America/New_York")
-PRESET_STATE_VERSION = "2026-08-13-filter-v2"
+PRESET_STATE_VERSION = "2026-08-13-history-v3"
 PRESET_DEFAULTS = {
     "Dashboard": AUTO_SYMBOLS,
     "Neoclouds": NEOCLOUD_SYMBOLS,
@@ -84,6 +85,66 @@ def display_series(history: pd.DataFrame, metric: str, change_mode: str) -> tupl
     return work.pivot(index="snapshot_date", columns="symbol", values="value").sort_index(), ylabel
 
 
+def historical_line_chart(series: pd.DataFrame, ylabel: str) -> go.Figure:
+    fig = go.Figure()
+    for symbol in series.columns:
+        fig.add_trace(
+            go.Scatter(
+                x=series.index,
+                y=series[symbol],
+                name=str(symbol),
+                mode="lines+markers",
+                connectgaps=False,
+                line={"width": 2},
+                marker={"size": 5},
+                hovertemplate=f"{symbol}<br>%{{x|%Y-%m-%d}}<br>%{{y:.2f}}<extra></extra>",
+            )
+        )
+
+    fig.update_layout(
+        template="plotly_dark",
+        height=520,
+        margin={"l": 52, "r": 20, "t": 28, "b": 48},
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        hovermode="x unified",
+        dragmode="pan",
+        legend={
+            "orientation": "h",
+            "yanchor": "bottom",
+            "y": 1.02,
+            "xanchor": "left",
+            "x": 0,
+            "font": {"size": 11},
+        },
+        xaxis={
+            "type": "date",
+            "fixedrange": False,
+            "showgrid": True,
+            "gridcolor": "rgba(255,255,255,0.10)",
+            "zeroline": False,
+            "showspikes": True,
+            "spikemode": "across",
+            "spikesnap": "cursor",
+            "spikecolor": "rgba(255,255,255,0.55)",
+            "rangeslider": {"visible": True, "thickness": 0.06},
+        },
+        yaxis={
+            "title": ylabel,
+            "autorange": True,
+            "fixedrange": False,
+            "showgrid": True,
+            "gridcolor": "rgba(255,255,255,0.10)",
+            "zeroline": False,
+            "showspikes": True,
+            "spikemode": "across",
+            "spikesnap": "cursor",
+            "spikecolor": "rgba(255,255,255,0.55)",
+        },
+    )
+    return fig
+
+
 def preset_token(name: str) -> str:
     return name.lower().replace("/", "_").replace(" ", "_").replace("+", "plus")
 
@@ -103,6 +164,7 @@ def reset_preset_state_once() -> None:
         st.session_state.pop(members_key(name), None)
         st.session_state.pop(selection_key(name), None)
     st.session_state.pop("iv_history_symbols", None)
+    st.session_state.pop("iv_history_ticker_source", None)
     st.session_state["iv_preset_state_version"] = PRESET_STATE_VERSION
 
 
@@ -118,6 +180,13 @@ def ensure_preset(name: str) -> list[str]:
 def symbols_for_presets(presets: list[str]) -> list[str]:
     symbols: list[str] = []
     for name in presets:
+        symbols.extend(ensure_preset(name))
+    return list(dict.fromkeys(symbols))
+
+
+def all_preset_symbols() -> list[str]:
+    symbols: list[str] = []
+    for name in PRESET_DEFAULTS:
         symbols.extend(ensure_preset(name))
     return list(dict.fromkeys(symbols))
 
@@ -176,11 +245,6 @@ def chart(cross: pd.DataFrame, metric_column: str, axis_title: str, label_title:
         cross, metric_column, axis_title, label_title, signed,
         PRESET_COLOR_ORDER, PRESET_COLORS, REFERENCE_COLORS, INDEX_SYMBOLS,
     )
-
-
-def sanitize_history(options: list[str]) -> None:
-    current = [x for x in st.session_state.get("iv_history_symbols", []) if x in options]
-    st.session_state["iv_history_symbols"] = current or options[: min(5, len(options))]
 
 
 st.set_page_config(page_title="IV & Skew", page_icon="↕", layout="wide")
@@ -330,12 +394,45 @@ else:
 
 st.divider()
 st.subheader("Historical 25Δ IV & skew")
-history_controls = st.columns([1.4, 1, 2.2])
+history_controls = st.columns([1.15, 1.15, 1.25, 2.45])
 metric = history_controls[0].selectbox("Metric", ["25Δ Skew", "25Δ Call IV", "25Δ Put IV"])
-change_mode = history_controls[1].segmented_control("View", ["Level", "1D Δ", "1W Δ", "1M Δ"], default="Level") or "Level"
-if selected:
-    sanitize_history(selected)
-history_symbols = history_controls[2].multiselect("Historical tickers", options=selected, key="iv_history_symbols")
+change_mode = history_controls[1].segmented_control(
+    "View",
+    ["Level", "1D Δ", "1W Δ", "1M Δ"],
+    default="Level",
+    help="Level shows the stored metric. 1D Δ is the change from the prior stored session; 1W Δ uses 5 stored observations; 1M Δ uses 21 stored observations.",
+) or "Level"
+history_ticker_source = history_controls[2].segmented_control(
+    "Tickers",
+    ["Filtered", "Custom"],
+    default="Filtered",
+    key="iv_history_ticker_source",
+    help="Filtered mirrors the main Preset filter. Custom lets you select any saved dashboard ticker without changing the other graphs.",
+) or "Filtered"
+all_history_options = all_preset_symbols()
+
+if history_ticker_source == "Filtered":
+    history_symbols = list(selected)
+    history_controls[3].markdown(
+        f"**Historical tickers**  \nUsing all **{len(history_symbols)}** ticker(s) from the current Preset filter."
+    )
+else:
+    current_history = [
+        symbol
+        for symbol in st.session_state.get("iv_history_symbols", selected)
+        if symbol in all_history_options
+    ]
+    if "iv_history_symbols" not in st.session_state:
+        st.session_state["iv_history_symbols"] = current_history or list(selected)
+    elif st.session_state["iv_history_symbols"] != current_history:
+        st.session_state["iv_history_symbols"] = current_history
+    history_symbols = history_controls[3].multiselect(
+        "Historical tickers",
+        options=all_history_options,
+        key="iv_history_symbols",
+        help="Choose any ticker available in the dashboard presets. This only reads saved Supabase history and does not request MarketData.",
+    )
+
 if store.enabled and history_symbols:
     end_date = datetime.now(EASTERN).date()
     try:
@@ -347,8 +444,32 @@ if store.enabled and history_symbols:
         st.info("No history is stored for this selection yet. Daily scheduled snapshots will build it automatically.")
     else:
         chart_data, ylabel = display_series(hist, metric, change_mode)
-        st.line_chart(chart_data, height=460, use_container_width=True)
-        st.caption(ylabel + f" · target tenor: {tenor} ({DAILY_TENORS[tenor]} DTE).")
+        if chart_data.dropna(how="all").empty:
+            st.info("There are not enough saved observations for this change view yet.")
+        else:
+            st.plotly_chart(
+                historical_line_chart(chart_data, ylabel),
+                width="stretch",
+                config={
+                    "scrollZoom": True,
+                    "displaylogo": False,
+                    "responsive": True,
+                    "modeBarButtonsToRemove": ["select2d", "lasso2d"],
+                },
+            )
+            st.caption(
+                ylabel
+                + f" · target tenor: {tenor} ({DAILY_TENORS[tenor]} DTE). "
+                + "Drag to pan, mouse-wheel/pinch to zoom, drag either axis to rescale, and use the modebar Autoscale/Reset controls."
+            )
+            st.caption(
+                "View: Level = the stored IV/skew value; 1D Δ = change versus the previous stored session; "
+                "1W Δ = change versus 5 stored sessions; 1M Δ = change versus 21 stored sessions."
+            )
+elif store.enabled and history_ticker_source == "Filtered" and not selected:
+    st.info("Select at least one preset above, or switch Historical tickers to Custom.")
+elif store.enabled and history_ticker_source == "Custom" and not history_symbols:
+    st.info("Choose at least one historical ticker.")
 
 if not cross.empty:
     st.divider()
@@ -366,6 +487,8 @@ with st.expander("Method & API-credit behavior"):
 - **25Δ skew:** `25Δ call IV − 25Δ put IV`, in volatility points.
 - **Daily basket:** Dashboard contains all **{len(AUTO_SYMBOLS)}** symbols run by the automatic daily task.
 - **Preset filter:** selecting one or multiple presets changes presentation only and consumes **0 MarketData credits**.
+- **Historical ticker source:** Filtered mirrors the main preset filter; Custom can display any saved dashboard ticker(s) independently.
+- **Historical View:** Level shows the stored value. 1D Δ compares with the prior stored session, 1W Δ with 5 stored sessions earlier, and 1M Δ with 21 stored sessions earlier.
 - **Cross-section sort:** the same control applies to all three bar tables; rank modes use each table's own metric.
 - **Daily tenors:** 1W and 1M target 7 and 30 DTE and use the available expiration closest to each target.
 - **Pool average:** equal-weight average of displayed non-index stocks; SPY, QQQ and IWM are excluded.
