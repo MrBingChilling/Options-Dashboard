@@ -145,16 +145,16 @@ def attach_groups(cross: pd.DataFrame, display_presets: list[str]) -> pd.DataFra
     return out
 
 
-def sort_cross(cross: pd.DataFrame, mode: str) -> pd.DataFrame:
-    if mode == "Most positive first":
-        return cross.sort_values(["skew_25d", "symbol"], ascending=[False, True])
+def sort_cross(cross: pd.DataFrame, mode: str, metric_column: str) -> pd.DataFrame:
+    if mode == "Rank (High → low)":
+        return cross.sort_values([metric_column, "symbol"], ascending=[False, True])
     if mode == "Alphabetical":
         return cross.sort_values("symbol")
     if mode == "Preset":
         rank = {group: i for i, group in enumerate(PRESET_COLOR_ORDER)}
         out = cross.assign(_rank=cross["preset_group"].map(rank).fillna(len(rank)))
-        return out.sort_values(["_rank", "skew_25d", "symbol"]).drop(columns="_rank")
-    return cross.sort_values(["skew_25d", "symbol"])
+        return out.sort_values(["_rank", metric_column, "symbol"], ascending=[True, True, True]).drop(columns="_rank")
+    return cross.sort_values([metric_column, "symbol"], ascending=[True, True])
 
 
 def completed_symbols(store: SnapshotStore, symbols: list[str], session_date: date) -> set[str]:
@@ -243,7 +243,11 @@ if edited != members:
 selected = symbols_for_presets(display_presets)
 controls = st.columns([1, 1.25, 1.25, 1.6])
 tenor = controls[0].segmented_control("Tenor", list(DAILY_TENORS), default="1M") or "1M"
-sort_mode = controls[1].selectbox("Cross-section sort", ["Rank (low → high)", "Alphabetical", "Preset", "Most positive first"])
+sort_mode = controls[1].selectbox(
+    "Cross-section sort",
+    ["Rank (low → high)", "Alphabetical", "Preset", "Rank (High → low)"],
+    help="Applies independently to the skew, put-IV and call-IV tables using each table's own displayed metric.",
+)
 history_period = controls[2].segmented_control("History", ["1M", "3M", "6M", "1Y", "Max"], default="6M") or "6M"
 manual_request = controls[3].button(
     "Request missing displayed from MarketData",
@@ -304,16 +308,17 @@ else:
         st.info("No saved snapshots exist for this selection yet.")
     else:
         cross = latest.dropna(subset=["skew_25d", "call_25d_iv", "put_25d_iv"]).copy()
-        cross = sort_cross(attach_groups(cross, display_presets), sort_mode)
+        cross = attach_groups(cross, display_presets)
+        skew_cross = sort_cross(cross, sort_mode, "skew_25d")
         newest = cross["snapshot_date"].max() if not cross.empty else None
         if newest is not None:
             st.caption(f"Latest saved session shown: {newest}. SPY, QQQ and the displayed non-index average use only the filtered rows.")
         if newest is not None and not cross[cross["snapshot_date"] < newest].empty:
             st.caption("Some tickers use an older available session; hover a bar or open details to see each snapshot date.")
-        st.altair_chart(chart(cross, "skew_25d", "25Δ call IV − 25Δ put IV (vol points)", "Skew (vol pts)", True), use_container_width=True)
+        st.altair_chart(chart(skew_cross, "skew_25d", "25Δ call IV − 25Δ put IV (vol points)", "Skew (vol pts)", True), use_container_width=True)
         st.caption("Bar colors identify preset groups. The edge touching the white zero line is square; only the outer value edge is rounded.")
         with st.expander("Cross-section details"):
-            details = cross[["symbol", "preset_group", "snapshot_date", "actual_dte", "expiration", "spot", "call_25d_iv", "put_25d_iv", "skew_25d"]].copy()
+            details = skew_cross[["symbol", "preset_group", "snapshot_date", "actual_dte", "expiration", "spot", "call_25d_iv", "put_25d_iv", "skew_25d"]].copy()
             for column in ("call_25d_iv", "put_25d_iv", "skew_25d"):
                 details[column] *= 100.0
             details = details.rename(columns={
@@ -348,10 +353,12 @@ if store.enabled and history_symbols:
 if not cross.empty:
     st.divider()
     st.subheader("25Δ Put IV")
-    st.altair_chart(chart(cross, "put_25d_iv", "25Δ put implied volatility (%)", "Put IV (%)", False), use_container_width=True)
+    put_cross = sort_cross(cross, sort_mode, "put_25d_iv")
+    st.altair_chart(chart(put_cross, "put_25d_iv", "25Δ put implied volatility (%)", "Put IV (%)", False), use_container_width=True)
     st.divider()
     st.subheader("25Δ Call IV")
-    st.altair_chart(chart(cross, "call_25d_iv", "25Δ call implied volatility (%)", "Call IV (%)", False), use_container_width=True)
+    call_cross = sort_cross(cross, sort_mode, "call_25d_iv")
+    st.altair_chart(chart(call_cross, "call_25d_iv", "25Δ call implied volatility (%)", "Call IV (%)", False), use_container_width=True)
 
 st.divider()
 with st.expander("Method & API-credit behavior"):
@@ -359,6 +366,7 @@ with st.expander("Method & API-credit behavior"):
 - **25Δ skew:** `25Δ call IV − 25Δ put IV`, in volatility points.
 - **Daily basket:** Dashboard contains all **{len(AUTO_SYMBOLS)}** symbols run by the automatic daily task.
 - **Preset filter:** selecting one or multiple presets changes presentation only and consumes **0 MarketData credits**.
+- **Cross-section sort:** the same control applies to all three bar tables; rank modes use each table's own metric.
 - **Daily tenors:** 1W and 1M target 7 and 30 DTE and use the available expiration closest to each target.
 - **Pool average:** equal-weight average of displayed non-index stocks; SPY, QQQ and IWM are excluded.
 - **Automatic data:** GitHub Actions writes daily rows to Supabase. Opening, refreshing or filtering this page does **not** call MarketData.
