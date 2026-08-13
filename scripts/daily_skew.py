@@ -117,18 +117,21 @@ def main() -> int:
         )
         return 0
 
-    # SPY is used as the first/probe request. On an exchange holiday, MarketData
-    # can return the prior actual session. After that single probe we re-check
-    # Supabase and avoid re-requesting an already-complete prior session.
     probe = "SPY"
     actual_session = requested_date
+    attempted: set[str] = set()
+    successes = 0
+    failures: list[str] = []
 
     if probe not in completed:
+        attempted.add(probe)
         try:
             actual_session = _fetch_and_save(
                 client, store, probe, requested_date
             )
+            successes += 1
         except (MarketDataError, SnapshotStoreError, ValueError) as exc:
+            failures.append(f"{probe}: {exc}")
             print(f"[failed] {probe}: {exc}", flush=True)
 
     if actual_session != requested_date:
@@ -143,41 +146,47 @@ def main() -> int:
     except SnapshotStoreError as exc:
         raise SystemExit(f"Could not re-check Supabase: {exc}")
 
-    missing = [symbol for symbol in symbols if symbol not in completed]
+    missing = [
+        symbol
+        for symbol in symbols
+        if symbol not in completed and symbol not in attempted
+    ]
+
     if not missing:
+        if successes == 0 and failures:
+            print("No skew rows were saved.", flush=True)
+            return 1
         print(
-            f"{actual_session} is already complete after the probe. "
+            f"{actual_session} is complete after the probe. "
             "No further MarketData requests are needed.",
             flush=True,
         )
         return 0
 
-    failures: list[str] = []
     for index, symbol in enumerate(missing, start=1):
-        # The SPY probe may have failed. Otherwise it will already be complete.
-        if symbol == probe and symbol in completed:
-            continue
-
+        attempted.add(symbol)
         print(
             f"[{index}/{len(missing)}] collecting {symbol}",
             flush=True,
         )
         try:
             _fetch_and_save(client, store, symbol, requested_date)
+            successes += 1
         except (MarketDataError, SnapshotStoreError, ValueError) as exc:
             failures.append(f"{symbol}: {exc}")
             print(f"[failed] {symbol}: {exc}", flush=True)
 
     print(
-        f"Finished. Failed symbols: {len(failures)}.",
+        f"Finished. Successful symbols: {successes}. "
+        f"Failed symbols: {len(failures)}.",
         flush=True,
     )
     if failures:
         print("\n".join(failures), flush=True)
 
-    # Do not fail the whole scheduled workflow because one illiquid symbol
-    # lacked a usable 25D contract. Successful symbols have already been saved.
-    return 0
+    # Surface a completely broken collector as a failed Action, but don't throw
+    # away partial success when one or two illiquid symbols fail.
+    return 1 if successes == 0 else 0
 
 
 if __name__ == "__main__":
