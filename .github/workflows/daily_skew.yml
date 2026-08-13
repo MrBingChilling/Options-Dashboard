@@ -1,6 +1,11 @@
 name: Daily 25D skew snapshot
 
 on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/run-daily-skew-now"
   schedule:
     - cron: "10 7 * * 1-5"
       timezone: "America/Vancouver"
