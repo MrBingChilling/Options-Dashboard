@@ -65,11 +65,13 @@ HISTORY_METRIC_SHORT = {
     "25Δ Call IV": "Call IV",
     "25Δ Put IV": "Put IV",
 }
-HISTORY_METRIC_PALETTES = {
-    "Skew": ["#C084FC", "#E879F9", "#A78BFA", "#F472B6", "#D946EF", "#8B5CF6", "#FB7185", "#D8B4FE"],
-    "Call IV": ["#60A5FA", "#38BDF8", "#22D3EE", "#818CF8", "#3B82F6", "#06B6D4", "#93C5FD", "#67E8F9"],
-    "Put IV": ["#34D399", "#2DD4BF", "#A3E635", "#4ADE80", "#14B8A6", "#84CC16", "#6EE7B7", "#5EEAD4"],
-}
+HISTORY_COLOR_PALETTE = [
+    "#60A5FA", "#F472B6", "#34D399", "#FBBF24", "#A78BFA", "#FB7185",
+    "#22D3EE", "#F97316", "#84CC16", "#E879F9", "#2DD4BF", "#818CF8",
+    "#FACC15", "#4ADE80", "#38BDF8", "#C084FC", "#FB923C", "#F43F5E",
+    "#14B8A6", "#A3E635", "#EAB308", "#D946EF", "#06B6D4", "#8B5CF6",
+]
+HISTORY_METRIC_COLOR_OFFSET = {"Call IV": 0, "Put IV": 8, "Skew": 16}
 SERIES_SEPARATOR = " · "
 PRIMARY_PRESET_BY_SYMBOL: dict[str, str] = {}
 for group in PRESET_COLOR_ORDER:
@@ -117,19 +119,14 @@ def display_series(history: pd.DataFrame, metrics: list[str], change_mode: str) 
 
 
 def historical_series_colors(series: pd.DataFrame) -> dict[str, str]:
-    tickers: list[str] = []
-    for label in series.columns:
-        ticker = str(label).split(SERIES_SEPARATOR, 1)[0]
-        if ticker not in tickers:
-            tickers.append(ticker)
-    ticker_rank = {ticker: i for i, ticker in enumerate(tickers)}
-
     colors: dict[str, str] = {}
+    palette_size = len(HISTORY_COLOR_PALETTE)
     for label in series.columns:
         text = str(label)
         ticker, metric_short = text.split(SERIES_SEPARATOR, 1) if SERIES_SEPARATOR in text else (text, "Call IV")
-        palette = HISTORY_METRIC_PALETTES.get(metric_short, HISTORY_METRIC_PALETTES["Call IV"])
-        colors[text] = palette[ticker_rank.get(ticker, 0) % len(palette)]
+        ticker_seed = sum((i + 1) * ord(char) for i, char in enumerate(ticker.upper()))
+        metric_offset = HISTORY_METRIC_COLOR_OFFSET.get(metric_short, 0)
+        colors[text] = HISTORY_COLOR_PALETTE[(ticker_seed + metric_offset) % palette_size]
     return colors
 
 
@@ -561,8 +558,8 @@ elif store.enabled and history_symbols:
                 "Drag the chart to pan; drag the right price scale vertically to stretch/compress Y; pinch or mouse-wheel to zoom; double-click/double-tap the scale to reset."
             )
             st.caption(
-                "Colors identify both ticker and metric: Call IV uses blue/cyan shades, Put IV uses green/teal shades, and skew uses purple/pink shades. "
-                "The color key labels every series as TICKER · metric so the same ticker can be compared across multiple metrics."
+                "Historical series now use a broad mixed-color palette rather than metric-specific gradients, making large ticker baskets easier to distinguish. "
+                "Each ticker/metric combination gets a deterministic color, so filtering or rerendering does not randomly reshuffle its color."
             )
             if len(chart_data.columns) > 8:
                 st.caption(
@@ -595,7 +592,7 @@ with st.expander("Method & API-credit behavior"):
 - **Daily basket:** Dashboard contains all **{len(AUTO_SYMBOLS)}** symbols run by the automatic daily task.
 - **Preset filter:** selecting one or multiple presets changes presentation only and consumes **0 MarketData credits**.
 - **Historical ticker source:** Filtered mirrors the main preset filter; Custom can display any saved dashboard ticker(s) independently.
-- **Historical metrics:** select one or several of 25Δ skew, call IV and put IV. Every ticker/metric combination is a separate series and uses a metric-specific color family.
+- **Historical metrics:** select one or several of 25Δ skew, call IV and put IV. Every ticker/metric combination is a separate series with a stable color drawn from a broad mixed-hue palette.
 - **Historical range:** the 1M/3M/6M/1Y/Max selector sits with the historical chart because it does not affect the cross-section tables.
 - **Historical chart:** uses TradingView Lightweight Charts v5. Small point markers show every stored observation; one-observation series are dots only instead of fake horizontal lines. Large baskets use a one-row scrollable color key; small baskets also show price-scale ticker/metric labels. Native price/time scale dragging and pinch/mouse-wheel zoom are enabled.
 - **Historical View:** Level shows the stored value. 1D Δ compares with the prior stored session, 1W Δ with 5 stored sessions earlier, and 1M Δ with 21 stored sessions earlier.
