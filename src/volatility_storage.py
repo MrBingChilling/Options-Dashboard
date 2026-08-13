@@ -10,6 +10,8 @@ from src.volatility import VolatilitySnapshot
 
 
 VOLATILITY_TABLE = "volatility_snapshots"
+SUPABASE_PAGE_SIZE = 1000
+DEFAULT_HISTORY_LIMIT = 50000
 
 
 def endpoint(store: SnapshotStore) -> str:
@@ -45,23 +47,32 @@ def volatility_history(
     tenor: str,
     start_date=None,
     end_date=None,
-    limit: int = 10000,
+    limit: int = DEFAULT_HISTORY_LIMIT,
+    newest_first: bool = False,
 ) -> pd.DataFrame:
     if not store.enabled:
         return pd.DataFrame()
     cleaned = sorted({symbol.strip().upper() for symbol in symbols if symbol.strip()})
     if not cleaned:
         return pd.DataFrame()
+
+    requested_limit = max(0, int(limit))
+    if requested_limit == 0:
+        return pd.DataFrame()
+
     symbol_filter = ",".join(cleaned)
-    params: dict[str, str] = {
+    base_params: dict[str, str] = {
         "select": (
             "symbol,snapshot_date,tenor,target_dte,actual_dte,expiration,spot,"
             "atm_iv,call_25d_iv,put_25d_iv,skew_25d"
         ),
         "symbol": f"in.({symbol_filter})",
         "tenor": f"eq.{tenor}",
-        "order": "snapshot_date.asc,symbol.asc",
-        "limit": str(limit),
+        "order": (
+            "snapshot_date.desc,symbol.asc"
+            if newest_first
+            else "snapshot_date.asc,symbol.asc"
+        ),
     }
     date_terms: list[str] = []
     if start_date is not None:
@@ -70,16 +81,33 @@ def volatility_history(
         date_terms.append(f"snapshot_date.lte.{pd.Timestamp(end_date).date().isoformat()}")
     if len(date_terms) == 1:
         field, op, value = date_terms[0].split(".", 2)
-        params[field] = f"{op}.{value}"
+        base_params[field] = f"{op}.{value}"
     elif date_terms:
-        params["and"] = "(" + ",".join(date_terms) + ")"
+        base_params["and"] = "(" + ",".join(date_terms) + ")"
 
-    response = requests.get(endpoint(store), params=params, headers=store.headers, timeout=store.timeout)
-    if response.status_code != 200:
-        raise SnapshotStoreError(
-            f"Supabase volatility history load failed ({response.status_code}): {response.text[:300]}"
+    rows: list[dict] = []
+    offset = 0
+    while len(rows) < requested_limit:
+        page_limit = min(SUPABASE_PAGE_SIZE, requested_limit - len(rows))
+        params = {
+            **base_params,
+            "limit": str(page_limit),
+            "offset": str(offset),
+        }
+        response = requests.get(
+            endpoint(store), params=params, headers=store.headers, timeout=store.timeout
         )
-    frame = pd.DataFrame(response.json())
+        if response.status_code != 200:
+            raise SnapshotStoreError(
+                f"Supabase volatility history load failed ({response.status_code}): {response.text[:300]}"
+            )
+        batch = response.json()
+        if not batch:
+            break
+        rows.extend(batch)
+        offset += len(batch)
+
+    frame = pd.DataFrame(rows[:requested_limit])
     if frame.empty:
         return frame
     frame["snapshot_date"] = pd.to_datetime(frame["snapshot_date"])
@@ -98,13 +126,60 @@ def volatility_history(
 
 
 def latest_volatility(store: SnapshotStore, symbols: Iterable[str], tenor: str) -> pd.DataFrame:
-    history = volatility_history(store, symbols, tenor)
+    cleaned = sorted({symbol.strip().upper() for symbol in symbols if symbol.strip()})
+    if not cleaned:
+        return pd.DataFrame()
+
+    # Read newest rows first. The old implementation read ascending history and
+    # then took the last row per symbol; once the table exceeded Supabase's
+    # per-response row cap, that silently turned "latest" into the oldest ~1000
+    # rows (for the 49-name basket this landed around Sep 2025).
+    probe_limit = max(1000, len(cleaned) * 40)
+    history = volatility_history(
+        store,
+        cleaned,
+        tenor,
+        limit=probe_limit,
+        newest_first=True,
+    )
     if history.empty:
         return history
-    return (
+
+    latest = (
         history.sort_values("snapshot_date")
         .groupby("symbol", as_index=False)
         .tail(1)
+    )
+
+    # If a stale/rare ticker was not present in the newest probe window, fetch
+    # only those missing names so they do not prevent current names from loading.
+    present = set(latest["symbol"].astype(str).str.upper())
+    missing = [symbol for symbol in cleaned if symbol not in present]
+    if missing:
+        fallback = volatility_history(
+            store,
+            missing,
+            tenor,
+            limit=max(1000, len(missing) * 250),
+            newest_first=True,
+        )
+        if not fallback.empty:
+            fallback_latest = (
+                fallback.sort_values("snapshot_date")
+                .groupby("symbol", as_index=False)
+                .tail(1)
+            )
+            latest = pd.concat([latest, fallback_latest], ignore_index=True)
+
+    if latest.empty:
+        return latest
+
+    # Cross-sections should compare one market session, never mix yesterday with
+    # months-old fallback rows. Show the newest saved session and omit symbols
+    # that do not have that session yet.
+    newest_session = pd.to_datetime(latest["snapshot_date"]).max()
+    return (
+        latest[pd.to_datetime(latest["snapshot_date"]) == newest_session]
         .sort_values("symbol")
         .reset_index(drop=True)
     )
