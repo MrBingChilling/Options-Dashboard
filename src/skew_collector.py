@@ -41,12 +41,6 @@ AUTO_SYMBOLS = list(dict.fromkeys(AI_POOL_SYMBOLS + INDEX_SYMBOLS))
 
 
 def previous_weekday(value: date) -> date:
-    """Return the previous Monday-Friday date.
-
-    MarketData may fall back to the most recent actual trading session on
-    exchange holidays. The collector records result.snapshot_date, so holiday
-    fallbacks remain idempotent after the first probe.
-    """
     candidate = value - timedelta(days=1)
     while candidate.weekday() >= 5:
         candidate -= timedelta(days=1)
@@ -54,10 +48,22 @@ def previous_weekday(value: date) -> date:
 
 
 def _usable(chain: pd.DataFrame) -> pd.DataFrame:
+    """Keep rows required for 25D skew.
+
+    IMPORTANT:
+    MarketData's server-side delta=.25 filter already chooses the strike
+    closest to absolute 25 delta on both call and put sides. Historical
+    payloads can have a null returned `delta` even when that server-side
+    selection has been performed, so the local calculation must NOT require
+    delta to be present.
+
+    IV is still required. src.marketdata_client is responsible for any IV
+    fallback from quote prices before this function receives the frame.
+    """
     if chain is None or chain.empty:
         raise ValueError("The option chain is empty.")
 
-    required = {"expiration", "side", "dte", "underlyingPrice", "iv", "delta"}
+    required = {"expiration", "side", "dte", "underlyingPrice", "iv"}
     missing = required.difference(chain.columns)
     if missing:
         raise ValueError(
@@ -69,20 +75,23 @@ def _usable(chain: pd.DataFrame) -> pd.DataFrame:
     work["expiration"] = pd.to_datetime(work["expiration"], errors="coerce").dt.date
     work["side"] = work["side"].astype(str).str.lower().str.strip()
 
-    for column in ("dte", "underlyingPrice", "iv", "delta"):
+    for column in ("dte", "underlyingPrice", "iv"):
         work[column] = pd.to_numeric(work[column], errors="coerce")
+
+    if "delta" in work.columns:
+        work["delta"] = pd.to_numeric(work["delta"], errors="coerce")
 
     work = work[
         work["expiration"].notna()
         & work["side"].isin(["call", "put"])
         & work["dte"].notna()
+        & work["underlyingPrice"].notna()
         & work["iv"].notna()
-        & work["delta"].notna()
         & (work["iv"] > 0)
     ].copy()
 
     if work.empty:
-        raise ValueError("The chain has no contracts with usable IV/delta data.")
+        raise ValueError("The chain has no contracts with usable IV data.")
 
     return work
 
@@ -101,15 +110,26 @@ def _nearest_expiration(frame: pd.DataFrame, target_dte: int) -> pd.DataFrame:
     return frame[frame["expiration"] == expiration].copy()
 
 
-def _nearest_25d_iv(frame: pd.DataFrame, side: str) -> float:
+def _filtered_25d_iv(frame: pd.DataFrame, side: str) -> float:
+    """Return IV for the server-selected ~25D contract.
+
+    With delta=.25 in the MarketData request, the API has already selected the
+    strike nearest absolute 25 delta. If more than one usable row is present
+    for a side/expiration, prefer the row with returned delta closest to the
+    target when delta exists; otherwise use the median IV to avoid dependence
+    on row ordering.
+    """
     target = 0.25 if side == "call" else -0.25
     candidates = frame[frame["side"] == side].copy()
     if candidates.empty:
-        raise ValueError(f"No usable {side} contracts were returned.")
+        raise ValueError(f"No usable {side} contract was returned.")
 
-    candidates["delta_distance"] = (candidates["delta"] - target).abs()
-    row = candidates.sort_values("delta_distance").iloc[0]
-    return float(row["iv"])
+    if "delta" in candidates.columns and candidates["delta"].notna().any():
+        with_delta = candidates[candidates["delta"].notna()].copy()
+        with_delta["delta_distance"] = (with_delta["delta"] - target).abs()
+        return float(with_delta.sort_values("delta_distance").iloc[0]["iv"])
+
+    return float(candidates["iv"].median())
 
 
 def skew_snapshots_from_chain(
@@ -118,12 +138,7 @@ def skew_snapshots_from_chain(
     chain: pd.DataFrame,
     tenors: dict[str, int] | None = None,
 ) -> list[VolatilitySnapshot]:
-    """Build the minimum daily records required for 25-delta skew.
-
-    The MarketData request is intentionally filtered to ~25D contracts only.
-    ATM IV is therefore stored as NULL rather than pretending a 25D contract is
-    ATM. The existing Supabase column is nullable.
-    """
+    """Build compact 1W/1M 25-delta skew snapshots from one filtered chain."""
     targets = tenors or DAILY_TENORS
     work = _usable(chain)
     snapshots: list[VolatilitySnapshot] = []
@@ -131,8 +146,8 @@ def skew_snapshots_from_chain(
     for tenor, target_dte in targets.items():
         expiry_frame = _nearest_expiration(work, target_dte)
 
-        call_iv = _nearest_25d_iv(expiry_frame, "call")
-        put_iv = _nearest_25d_iv(expiry_frame, "put")
+        call_iv = _filtered_25d_iv(expiry_frame, "call")
+        put_iv = _filtered_25d_iv(expiry_frame, "put")
         actual_dte = int(round(float(expiry_frame["dte"].median())))
 
         spot_values = expiry_frame["underlyingPrice"].dropna()
