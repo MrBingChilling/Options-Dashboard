@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import html
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import pandas as pd
-import plotly.graph_objects as go
 import streamlit as st
+from lightweight_charts_v5 import lightweight_charts_v5_component
 
 from src import skew_metric_bar_chart
 from src.config import get_setting
@@ -29,7 +30,7 @@ from src.storage import SnapshotStore, SnapshotStoreError
 from src.volatility_storage import latest_volatility, save_volatility_snapshots, volatility_history
 
 EASTERN = ZoneInfo("America/New_York")
-PRESET_STATE_VERSION = "2026-08-13-history-v3"
+PRESET_STATE_VERSION = "2026-08-13-history-tv-v5"
 PRESET_DEFAULTS = {
     "Dashboard": AUTO_SYMBOLS,
     "Neoclouds": NEOCLOUD_SYMBOLS,
@@ -54,6 +55,10 @@ PRESET_COLORS = {
     "Custom": "#8992A8",
 }
 REFERENCE_COLORS = {"SPY": "#7AB8FF", "QQQ": "#70D39A", "Pool avg": "#F4C45E"}
+HISTORY_COLORS = [
+    "#5B8FF9", "#61DDAA", "#F6BD16", "#7262FD", "#78D3F8", "#F6903D", "#008685",
+    "#F08BB4", "#6DC8EC", "#B8E986", "#E8684A", "#9270CA", "#FF9D4D", "#269A99",
+]
 PRIMARY_PRESET_BY_SYMBOL: dict[str, str] = {}
 for group in PRESET_COLOR_ORDER:
     if group != "Custom":
@@ -85,91 +90,91 @@ def display_series(history: pd.DataFrame, metric: str, change_mode: str) -> tupl
     return work.pivot(index="snapshot_date", columns="symbol", values="value").sort_index(), ylabel
 
 
-def historical_y_range(series: pd.DataFrame, span_factor: float) -> list[float] | None:
-    values = pd.to_numeric(series.stack(), errors="coerce").dropna()
-    if values.empty:
-        return None
-    low = float(values.min())
-    high = float(values.max())
-    center = (low + high) / 2.0
-    span = high - low
-    if span <= 0:
-        span = max(abs(center) * 0.12, 1.0)
-    padded_half_span = max(span * 0.56, 0.5)
-    visible_half_span = padded_half_span * float(span_factor)
-    return [center - visible_half_span, center + visible_half_span]
-
-
-def historical_line_chart(
-    series: pd.DataFrame,
-    ylabel: str,
-    show_legend: bool,
-    y_span_factor: float,
-) -> go.Figure:
-    fig = go.Figure()
-    dense = len(series.columns) > 12
-    for symbol in series.columns:
-        fig.add_trace(
-            go.Scatter(
-                x=series.index,
-                y=series[symbol],
-                name=str(symbol),
-                mode="lines" if dense else "lines+markers",
-                connectgaps=False,
-                line={"width": 1.5 if dense else 2},
-                marker={"size": 4},
-                hovertemplate=f"{symbol}<br>%{{x|%Y-%m-%d}}<br>%{{y:.2f}}<extra></extra>",
-            )
+def historical_tradingview_config(series: pd.DataFrame) -> list[dict[str, object]]:
+    dense = len(series.columns) > 10
+    show_price_labels = len(series.columns) <= 8
+    series_config: list[dict[str, object]] = []
+    dates = pd.to_datetime(series.index, errors="coerce")
+    for i, symbol in enumerate(series.columns):
+        values = pd.to_numeric(series[symbol], errors="coerce")
+        data = [
+            {"time": stamp.strftime("%Y-%m-%d"), "value": float(value)}
+            for stamp, value in zip(dates, values)
+            if not pd.isna(stamp) and not pd.isna(value)
+        ]
+        if not data:
+            continue
+        series_config.append(
+            {
+                "type": "Line",
+                "data": data,
+                "options": {
+                    "color": HISTORY_COLORS[i % len(HISTORY_COLORS)],
+                    "lineWidth": 1 if dense else 2,
+                    "title": str(symbol) if show_price_labels else "",
+                    "lastValueVisible": show_price_labels,
+                    "priceLineVisible": False,
+                    "crosshairMarkerVisible": True,
+                    "priceFormat": {"type": "price", "precision": 2, "minMove": 0.01},
+                },
+            }
         )
 
-    y_range = historical_y_range(series, y_span_factor)
-    yaxis = {
-        "title": ylabel,
-        "autorange": y_range is None,
-        "fixedrange": False,
-        "showgrid": True,
-        "gridcolor": "rgba(255,255,255,0.10)",
-        "zeroline": False,
-        "showspikes": True,
-        "spikemode": "across",
-        "spikesnap": "cursor",
-        "spikecolor": "rgba(255,255,255,0.55)",
-    }
-    if y_range is not None:
-        yaxis["range"] = y_range
+    return [
+        {
+            "chart": {
+                "layout": {
+                    "background": {"color": "#081225"},
+                    "textColor": "#D1D7E3",
+                    "fontSize": 11,
+                },
+                "grid": {
+                    "vertLines": {"color": "rgba(255,255,255,0.07)"},
+                    "horzLines": {"color": "rgba(255,255,255,0.07)"},
+                },
+                "crosshair": {"mode": 0},
+                "handleScale": {
+                    "mouseWheel": True,
+                    "pinch": True,
+                    "axisPressedMouseMove": {"time": True, "price": True},
+                    "axisDoubleClickReset": {"time": True, "price": True},
+                },
+                "handleScroll": {
+                    "mouseWheel": True,
+                    "pressedMouseMove": True,
+                    "horzTouchDrag": True,
+                    "vertTouchDrag": True,
+                },
+                "timeScale": {"visible": True},
+                "priceScaleBorderColor": "rgba(255,255,255,0.18)",
+                "timeScaleBorderColor": "rgba(255,255,255,0.18)",
+            },
+            "series": series_config,
+            "height": 570,
+        }
+    ]
 
-    fig.update_layout(
-        template="plotly_dark",
-        height=590,
-        margin={"l": 54, "r": 18, "t": 42 if show_legend else 12, "b": 58},
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
-        hovermode="closest",
-        dragmode="pan",
-        showlegend=show_legend,
-        legend={
-            "orientation": "h",
-            "yanchor": "bottom",
-            "y": 1.02,
-            "xanchor": "left",
-            "x": 0,
-            "font": {"size": 10},
-        },
-        xaxis={
-            "type": "date",
-            "fixedrange": False,
-            "showgrid": True,
-            "gridcolor": "rgba(255,255,255,0.10)",
-            "zeroline": False,
-            "showspikes": True,
-            "spikemode": "across",
-            "spikesnap": "cursor",
-            "spikecolor": "rgba(255,255,255,0.55)",
-            "rangeslider": {"visible": True, "thickness": 0.055},
-        },
-        yaxis=yaxis,
+
+def historical_color_key(series: pd.DataFrame) -> str:
+    chips: list[str] = []
+    for i, symbol in enumerate(series.columns):
+        values = pd.to_numeric(series[symbol], errors="coerce").dropna()
+        if values.empty:
+            continue
+        color = HISTORY_COLORS[i % len(HISTORY_COLORS)]
+        safe_symbol = html.escape(str(symbol))
+        latest = float(values.iloc[-1])
+        chips.append(
+            f'<span style="display:inline-flex;align-items:center;gap:5px;margin-right:6px;padding:4px 7px;'
+            f'border:1px solid rgba(255,255,255,.12);border-radius:7px;font-size:11px;">'
+            f'<span style="width:7px;height:7px;border-radius:50%;background:{color};display:inline-block;"></span>'
+            f'<b>{safe_symbol}</b><span style="color:#AEB8C9;">{latest:.2f}</span></span>'
+        )
+    return (
+        '<div style="overflow-x:auto;white-space:nowrap;padding:2px 0 7px;scrollbar-width:thin;">'
+        + "".join(chips)
+        + "</div>"
     )
-    return fig
 
 
 def preset_token(name: str) -> str:
@@ -255,14 +260,14 @@ def sort_cross(cross: pd.DataFrame, mode: str, metric_column: str) -> pd.DataFra
 
 def completed_symbols(store: SnapshotStore, symbols: list[str], session_date: date) -> set[str]:
     complete = {symbol: set() for symbol in symbols}
-    for tenor in DAILY_TENORS:
-        frame = latest_volatility(store, symbols, tenor)
+    for tenor_name in DAILY_TENORS:
+        frame = latest_volatility(store, symbols, tenor_name)
         if frame.empty:
             continue
         work = frame.copy()
         work["snapshot_date"] = pd.to_datetime(work["snapshot_date"], errors="coerce").dt.date
         for symbol in work.loc[work["snapshot_date"] == session_date, "symbol"].astype(str):
-            complete.setdefault(symbol.upper(), set()).add(tenor)
+            complete.setdefault(symbol.upper(), set()).add(tenor_name)
     needed = set(DAILY_TENORS)
     return {symbol for symbol, tenors in complete.items() if needed.issubset(tenors)}
 
@@ -460,23 +465,6 @@ else:
         help="Choose any ticker available in the dashboard presets. This only reads saved Supabase history and does not request MarketData.",
     )
 
-history_chart_controls = st.columns([2.4, 1.2])
-y_span_factor = history_chart_controls[0].slider(
-    "Y-axis span",
-    min_value=0.35,
-    max_value=4.0,
-    value=1.0,
-    step=0.15,
-    key="iv_history_y_span",
-    help="Lower than 1× magnifies the Y-axis (tighter range). Higher than 1× shrinks the plot vertically (wider range). 1× fits the displayed data with a small margin.",
-)
-show_history_legend = history_chart_controls[1].toggle(
-    "Show ticker legend",
-    value=False,
-    key="iv_history_show_legend",
-    help="Off by default so large filtered baskets do not consume the mobile chart area. Hover a line to identify its ticker.",
-)
-
 if store.enabled and history_symbols:
     end_date = datetime.now(EASTERN).date()
     try:
@@ -491,26 +479,26 @@ if store.enabled and history_symbols:
         if chart_data.dropna(how="all").empty:
             st.info("There are not enough saved observations for this change view yet.")
         else:
-            st.plotly_chart(
-                historical_line_chart(chart_data, ylabel, show_history_legend, y_span_factor),
-                width="stretch",
-                config={
-                    "scrollZoom": True,
-                    "displaylogo": False,
-                    "responsive": True,
-                    "doubleClick": "reset+autosize",
-                    "modeBarButtonsToRemove": ["select2d", "lasso2d"],
-                },
+            st.markdown(historical_color_key(chart_data), unsafe_allow_html=True)
+            lightweight_charts_v5_component(
+                name="Historical IV & skew",
+                charts=historical_tradingview_config(chart_data),
+                height=570,
+                zoom_level=max(10000, len(chart_data.index) + 50),
+                configure_time_scale=False,
+                key="iv_history_tradingview",
             )
-            if len(history_symbols) > 12 and not show_history_legend:
-                st.caption(
-                    f"Legend hidden to preserve chart space for {len(history_symbols)} tickers. Hover the nearest line to see its ticker and value."
-                )
+            first_date = pd.to_datetime(chart_data.index.min()).date()
+            last_date = pd.to_datetime(chart_data.index.max()).date()
             st.caption(
-                ylabel
-                + f" · target tenor: {tenor} ({DAILY_TENORS[tenor]} DTE). "
-                + "Use the Y-axis span slider for fast vertical zoom; drag the chart to pan, pinch/mouse-wheel to zoom, or use the Plotly toolbar for zoom/autoscale/reset."
+                f"Showing all {len(chart_data.index)} stored session(s) returned for the selected History range: {first_date} → {last_date}. "
+                "Drag the chart to pan; drag the right price scale vertically to stretch/compress Y; pinch or mouse-wheel to zoom; double-click/double-tap the scale to reset."
             )
+            if len(chart_data.columns) > 8:
+                st.caption(
+                    "The color key above is horizontally scrollable so a large ticker basket does not cover the chart. "
+                    "For 8 or fewer tickers, TradingView also shows ticker/value labels directly on the price scale."
+                )
             st.caption(
                 "View: Level = the stored IV/skew value; 1D Δ = change versus the previous stored session; "
                 "1W Δ = change versus 5 stored sessions; 1M Δ = change versus 21 stored sessions."
@@ -537,7 +525,7 @@ with st.expander("Method & API-credit behavior"):
 - **Daily basket:** Dashboard contains all **{len(AUTO_SYMBOLS)}** symbols run by the automatic daily task.
 - **Preset filter:** selecting one or multiple presets changes presentation only and consumes **0 MarketData credits**.
 - **Historical ticker source:** Filtered mirrors the main preset filter; Custom can display any saved dashboard ticker(s) independently.
-- **Historical chart:** the ticker legend is hidden by default to preserve mobile chart space; the Y-axis span slider gives direct vertical magnification/shrink control.
+- **Historical chart:** uses TradingView Lightweight Charts v5. Large baskets use a one-row scrollable color key; small baskets also show price-scale ticker labels. Native price/time scale dragging and pinch/mouse-wheel zoom are enabled.
 - **Historical View:** Level shows the stored value. 1D Δ compares with the prior stored session, 1W Δ with 5 stored sessions earlier, and 1M Δ with 21 stored sessions earlier.
 - **Cross-section sort:** the same control applies to all three bar tables; rank modes use each table's own metric.
 - **Daily tenors:** 1W and 1M target 7 and 30 DTE and use the available expiration closest to each target.

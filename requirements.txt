@@ -3,4 +3,4 @@ pandas>=2.2,<3
 numpy>=1.26,<3
 requests>=2.32,<3
 pytest>=8,<9
-plotly>=6,<7
+streamlit-lightweight-charts-v5>=0.2,<0.3
