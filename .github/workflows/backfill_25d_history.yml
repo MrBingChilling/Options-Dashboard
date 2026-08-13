@@ -1,0 +1,83 @@
+name: Backfill 1Y 25D call-put IV history
+
+on:
+  workflow_dispatch:
+    inputs:
+      symbols:
+        description: "Comma-separated tickers, or AUTO for the daily automatic basket"
+        required: false
+        default: "AUTO"
+        type: string
+      start_date:
+        description: "Start session YYYY-MM-DD"
+        required: false
+        default: "2025-08-13"
+        type: string
+      end_date:
+        description: "End session YYYY-MM-DD"
+        required: false
+        default: "2026-08-12"
+        type: string
+      max_requests:
+        description: "Max ticker-day requests this run (0 = unlimited)"
+        required: false
+        default: "9000"
+        type: string
+      credit_reserve:
+        description: "Stop with at least this many reported credits remaining"
+        required: false
+        default: "750"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: backfill-1y-25d-history
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Backfill historical 25D call/put IV
+        shell: bash
+        env:
+          PYTHONUNBUFFERED: "1"
+          MARKETDATA_TOKEN: ${{ secrets.MARKETDATA_TOKEN }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          INPUT_SYMBOLS: ${{ inputs.symbols }}
+          INPUT_START: ${{ inputs.start_date }}
+          INPUT_END: ${{ inputs.end_date }}
+          INPUT_MAX_REQUESTS: ${{ inputs.max_requests }}
+          INPUT_CREDIT_RESERVE: ${{ inputs.credit_reserve }}
+        run: |
+          SYMBOLS="${INPUT_SYMBOLS:-AUTO}"
+          START_DATE="${INPUT_START:-2025-08-13}"
+          END_DATE="${INPUT_END:-2026-08-12}"
+          MAX_REQUESTS="${INPUT_MAX_REQUESTS:-9000}"
+          CREDIT_RESERVE="${INPUT_CREDIT_RESERVE:-750}"
+
+          PYTHONPATH=. python -u scripts/backfill_25d_history.py \
+            --symbols "$SYMBOLS" \
+            --start "$START_DATE" \
+            --end "$END_DATE" \
+            --max-requests "$MAX_REQUESTS" \
+            --credit-reserve "$CREDIT_RESERVE" \
+            --probe-symbol SPY
