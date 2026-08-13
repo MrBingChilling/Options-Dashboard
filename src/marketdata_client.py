@@ -17,6 +17,9 @@ from src.expiration_filters import (
 
 
 EASTERN = ZoneInfo("America/New_York")
+SKEW_MIN_DTE = 0
+SKEW_MAX_DTE = 45
+SKEW_STRIKE_LIMIT = 30
 NUMERIC_COLUMNS = {
     "ask",
     "bid",
@@ -102,10 +105,28 @@ class MarketDataClient:
         min_open_interest: int = 1,
         expiration_filter: str | None = None,
         delta_filter: str | None = None,
+        range_filter: str | None = None,
+        strike_limit: int | None = None,
     ) -> ChainResult:
         symbol = symbol.strip().upper()
         if not symbol or not symbol.replace(".", "").replace("-", "").isalnum():
             raise ValueError("Enter a valid US ticker symbol.")
+
+        # The IV & Skew page historically called fetch_chain(..., delta_filter="0.25")
+        # directly. Preserve that manual-request call site while routing it through
+        # the same bounded local-25D path as the automatic collector.
+        if (
+            delta_filter == "0.25"
+            and expiration_filter is None
+            and min_dte == SKEW_MIN_DTE
+            and max_dte == SKEW_MAX_DTE
+            and range_filter is None
+            and strike_limit is None
+        ):
+            delta_filter = None
+            range_filter = "otm"
+            strike_limit = SKEW_STRIKE_LIMIT
+
         selection = (
             resolve_expiration_filter(expiration_filter)
             if expiration_filter
@@ -122,6 +143,8 @@ class MarketDataClient:
                     selection,
                     min_open_interest,
                     delta_filter=delta_filter,
+                    range_filter=range_filter,
+                    strike_limit=strike_limit,
                 )
             except _LatestAvailableSession as exc:
                 last_error = str(exc)
@@ -149,6 +172,27 @@ class MarketDataClient:
             f"Provider response: {last_error}"
         )
 
+    def fetch_skew_chain(
+        self,
+        symbol: str,
+        analysis_date: date,
+    ) -> ChainResult:
+        """Fetch the bounded historical chain used for 1W/1M 25D skew.
+
+        Do not use MarketData's delta filter here. Historical rows can have null
+        vendor IV/Greeks, so the 25-delta contract is selected locally after IV
+        and delta are reconstructed from quote prices.
+        """
+        return self.fetch_chain(
+            symbol,
+            analysis_date,
+            min_dte=SKEW_MIN_DTE,
+            max_dte=SKEW_MAX_DTE,
+            min_open_interest=0,
+            range_filter="otm",
+            strike_limit=SKEW_STRIKE_LIMIT,
+        )
+
     def _request_chain(
         self,
         symbol: str,
@@ -156,6 +200,8 @@ class MarketDataClient:
         expiration_selection: ExpirationSelection,
         min_open_interest: int,
         delta_filter: str | None = None,
+        range_filter: str | None = None,
+        strike_limit: int | None = None,
     ) -> dict[str, Any]:
         params = {
             "date": snapshot_date.isoformat(),
@@ -165,6 +211,12 @@ class MarketDataClient:
         params.update(expiration_selection.request_params(snapshot_date))
         if delta_filter:
             params["delta"] = delta_filter
+        if range_filter:
+            params["range"] = range_filter
+        if strike_limit is not None:
+            if strike_limit <= 0:
+                raise ValueError("strike_limit must be positive.")
+            params["strikeLimit"] = int(strike_limit)
         response = self.session.get(
             f"{self.BASE_URL}/options/chain/{symbol}/",
             params=params,
@@ -362,7 +414,7 @@ class MarketDataClient:
         frame = frame.dropna(
             subset=["strike", "openInterest", "underlyingPrice", "expiration"]
         )
-        frame = frame[frame["openInterest"] > 0]
+        frame = frame[frame["openInterest"] >= 0]
         return frame.reset_index(drop=True)
 
     @staticmethod
