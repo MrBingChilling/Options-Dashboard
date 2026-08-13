@@ -10,6 +10,8 @@ from src.volatility import VolatilitySnapshot, snapshot_from_chain
 
 DAILY_TENORS = {"1W": 7, "1M": 30}
 
+# Existing 24-stock AI / semiconductor basket, kept in its original order for
+# backward compatibility and for the Dashboard preset.
 AI_POOL_SYMBOLS = [
     "AEHR",
     "STM",
@@ -37,8 +39,83 @@ AI_POOL_SYMBOLS = [
     "ASML",
 ]
 
+# The existing stock basket is intentionally divided into one primary display
+# group per symbol. Some names have mixed business models; these buckets are
+# meant for dashboard organization rather than strict industry classification.
+AI_PHOTONICS_SYMBOLS = [
+    "AXTI",
+    "ANET",
+    "CIEN",
+    "AAOI",
+    "COHR",
+    "LITE",
+    "NOK",
+]
+
+AI_FABLESS_SEMI_SYMBOLS = [
+    "NVDA",
+    "AVGO",
+    "AMD",
+    "CBRS",
+]
+
+AI_MEMORY_SYMBOLS = [
+    "SNDK",
+    "MU",
+    "SKHY",
+]
+
+AI_FABS_SYMBOLS = [
+    "AEHR",
+    "STM",
+    "ON",
+    "KLAC",
+    "GFS",
+    "LRCX",
+    "AMAT",
+    "WOLF",
+    "INTC",
+    "ASML",
+]
+
 INDEX_SYMBOLS = ["SPY", "QQQ", "IWM"]
-AUTO_SYMBOLS = list(dict.fromkeys(AI_POOL_SYMBOLS + INDEX_SYMBOLS))
+
+NEOCLOUD_SYMBOLS = [
+    "CRWV",
+    "NBIS",
+    "IREN",
+    "ORCL",
+]
+
+MAG7_SYMBOLS = [
+    "AAPL",
+    "MSFT",
+    "GOOGL",
+    "AMZN",
+    "META",
+    "NVDA",
+    "TSLA",
+]
+
+SOFTWARE_SYMBOLS = [
+    "PANW",
+    "PLTR",
+    "CRWD",
+    "CRM",
+    "NOW",
+]
+
+# Automatic daily basket. dict.fromkeys preserves the display order while
+# de-duplicating NVDA, which belongs to both the legacy AI pool and Mag 7.
+AUTO_SYMBOLS = list(
+    dict.fromkeys(
+        AI_POOL_SYMBOLS
+        + INDEX_SYMBOLS
+        + NEOCLOUD_SYMBOLS
+        + MAG7_SYMBOLS
+        + SOFTWARE_SYMBOLS
+    )
+)
 
 
 def previous_weekday(value: date) -> date:
