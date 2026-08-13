@@ -9,6 +9,7 @@ import streamlit as st
 from lightweight_charts_v5 import lightweight_charts_v5_component
 
 from src import skew_metric_bar_chart
+from src.compare_charts import skew_metric_compare_bar_chart
 from src.config import get_setting
 from src.marketdata_client import MarketDataClient, MarketDataError
 from src.skew_collector import (
@@ -318,7 +319,19 @@ def completed_symbols(store: SnapshotStore, symbols: list[str], session_date: da
     return {symbol for symbol, tenors in complete.items() if needed.issubset(tenors)}
 
 
-def chart(cross: pd.DataFrame, metric_column: str, axis_title: str, label_title: str, signed: bool):
+def chart(
+    cross: pd.DataFrame,
+    metric_column: str,
+    axis_title: str,
+    label_title: str,
+    signed: bool,
+    comparison: pd.DataFrame | None = None,
+):
+    if comparison is not None and not comparison.empty:
+        return skew_metric_compare_bar_chart(
+            cross, comparison, metric_column, axis_title, label_title, signed,
+            PRESET_COLOR_ORDER, PRESET_COLORS, REFERENCE_COLORS, INDEX_SYMBOLS,
+        )
     return skew_metric_bar_chart(
         cross, metric_column, axis_title, label_title, signed,
         PRESET_COLOR_ORDER, PRESET_COLORS, REFERENCE_COLORS, INDEX_SYMBOLS,
@@ -383,14 +396,24 @@ if edited != members:
     st.session_state[mk] = list(edited)
 
 selected = symbols_for_presets(display_presets)
-controls = st.columns([1, 1.35, 1.8])
+controls = st.columns([0.9, 1.25, 1.2, 1.8])
 tenor = controls[0].segmented_control("Tenor", list(DAILY_TENORS), default="1M") or "1M"
 sort_mode = controls[1].selectbox(
     "Cross-section sort",
     ["Rank (low → high)", "Alphabetical", "Preset", "Rank (High → low)"],
     help="Applies independently to the skew, put-IV and call-IV tables using each table's own displayed metric.",
 )
-manual_request = controls[2].button(
+compare_date = controls[2].date_input(
+    "Compare",
+    value=None,
+    max_value=datetime.now(EASTERN).date() - timedelta(days=1),
+    format="YYYY-MM-DD",
+    help=(
+        "Optional past saved session. When selected, all three bar charts show that session as a wider faded bar "
+        "behind the thinner solid current bar. This reads Supabase only and uses 0 MarketData credits."
+    ),
+)
+manual_request = controls[3].button(
     "Request missing displayed from MarketData",
     type="primary",
     width="stretch",
@@ -435,6 +458,7 @@ if manual_request:
 preset_label = ", ".join(display_presets) if display_presets else "No preset"
 st.subheader(f"25Δ Put/Call Skew — {preset_label}")
 cross = pd.DataFrame()
+compare_cross = pd.DataFrame()
 if not store.enabled:
     st.info("Configure Supabase to load saved IV/skew history.")
 elif not selected:
@@ -452,11 +476,51 @@ else:
         cross = attach_groups(cross, display_presets)
         skew_cross = sort_cross(cross, sort_mode, "skew_25d")
         newest = cross["snapshot_date"].max() if not cross.empty else None
+        newest_date = pd.Timestamp(newest).date() if newest is not None else None
+        if compare_date is not None and newest_date is not None:
+            if compare_date >= newest_date:
+                st.warning(f"Compare must be earlier than the current saved session ({newest_date}).")
+            else:
+                try:
+                    compare_rows = volatility_history(
+                        store,
+                        selected,
+                        tenor,
+                        start_date=compare_date,
+                        end_date=compare_date,
+                        limit=max(1000, len(selected) * 4),
+                    )
+                except SnapshotStoreError as exc:
+                    compare_rows = pd.DataFrame()
+                    st.error(str(exc))
+                if compare_rows.empty:
+                    st.info(f"No saved {tenor} snapshot exists for the displayed tickers on {compare_date}.")
+                else:
+                    compare_cross = compare_rows.dropna(
+                        subset=["skew_25d", "call_25d_iv", "put_25d_iv"]
+                    ).copy()
+                    compare_cross = attach_groups(compare_cross, display_presets)
         if newest is not None:
             st.caption(f"Latest saved session shown: {newest}. SPY, QQQ and the displayed non-index average use only the filtered rows.")
+        if not compare_cross.empty:
+            matched = cross["symbol"].isin(compare_cross["symbol"]).sum()
+            st.caption(
+                f"Compare: {compare_date}. Wide faded bar = {compare_date}; thin solid bar = current. "
+                f"Historical matches available for {matched}/{len(cross)} displayed ticker(s)."
+            )
         if newest is not None and not cross[cross["snapshot_date"] < newest].empty:
             st.caption("Some tickers use an older available session; hover a bar or open details to see each snapshot date.")
-        st.altair_chart(chart(skew_cross, "skew_25d", "25Δ call IV − 25Δ put IV (vol points)", "Skew (vol pts)", True), use_container_width=True)
+        st.altair_chart(
+            chart(
+                skew_cross,
+                "skew_25d",
+                "25Δ call IV − 25Δ put IV (vol points)",
+                "Skew (vol pts)",
+                True,
+                compare_cross,
+            ),
+            use_container_width=True,
+        )
         st.caption("Bar colors identify preset groups. The edge touching the white zero line is square; only the outer value edge is rounded.")
         with st.expander("Cross-section details"):
             details = skew_cross[["symbol", "preset_group", "snapshot_date", "actual_dte", "expiration", "spot", "call_25d_iv", "put_25d_iv", "skew_25d"]].copy()
@@ -579,11 +643,31 @@ if not cross.empty:
     st.divider()
     st.subheader("25Δ Put IV")
     put_cross = sort_cross(cross, sort_mode, "put_25d_iv")
-    st.altair_chart(chart(put_cross, "put_25d_iv", "25Δ put implied volatility (%)", "Put IV (%)", False), use_container_width=True)
+    st.altair_chart(
+        chart(
+            put_cross,
+            "put_25d_iv",
+            "25Δ put implied volatility (%)",
+            "Put IV (%)",
+            False,
+            compare_cross,
+        ),
+        use_container_width=True,
+    )
     st.divider()
     st.subheader("25Δ Call IV")
     call_cross = sort_cross(cross, sort_mode, "call_25d_iv")
-    st.altair_chart(chart(call_cross, "call_25d_iv", "25Δ call implied volatility (%)", "Call IV (%)", False), use_container_width=True)
+    st.altair_chart(
+        chart(
+            call_cross,
+            "call_25d_iv",
+            "25Δ call implied volatility (%)",
+            "Call IV (%)",
+            False,
+            compare_cross,
+        ),
+        use_container_width=True,
+    )
 
 st.divider()
 with st.expander("Method & API-credit behavior"):
@@ -591,6 +675,7 @@ with st.expander("Method & API-credit behavior"):
 - **25Δ skew:** `25Δ call IV − 25Δ put IV`, in volatility points.
 - **Daily basket:** Dashboard contains all **{len(AUTO_SYMBOLS)}** symbols run by the automatic daily task.
 - **Preset filter:** selecting one or multiple presets changes presentation only and consumes **0 MarketData credits**.
+- **Compare:** choose any earlier calendar date. If that exact saved session exists, all three cross-section bar charts overlay it as a wide faded bar behind the thin solid current bar. Compare reads Supabase only and consumes **0 MarketData credits**; dates without saved rows are not silently substituted.
 - **Historical ticker source:** Filtered mirrors the main preset filter; Custom can display any saved dashboard ticker(s) independently.
 - **Historical metrics:** select one or several of 25Δ skew, call IV and put IV. Every ticker/metric combination is a separate series with a stable color drawn from a broad mixed-hue palette.
 - **Historical range:** the 1M/3M/6M/1Y/Max selector sits with the historical chart because it does not affect the cross-section tables.
