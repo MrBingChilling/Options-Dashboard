@@ -10,10 +10,16 @@ import streamlit as st
 from src.config import get_setting
 from src.marketdata_client import MarketDataClient, MarketDataError
 from src.skew_collector import (
-    AI_POOL_SYMBOLS,
+    AI_FABLESS_SEMI_SYMBOLS,
+    AI_FABS_SYMBOLS,
+    AI_MEMORY_SYMBOLS,
+    AI_PHOTONICS_SYMBOLS,
     AUTO_SYMBOLS,
     DAILY_TENORS,
     INDEX_SYMBOLS,
+    MAG7_SYMBOLS,
+    NEOCLOUD_SYMBOLS,
+    SOFTWARE_SYMBOLS,
     previous_weekday,
     skew_snapshots_from_chain,
 )
@@ -27,23 +33,54 @@ from src.volatility_storage import (
 
 EASTERN = ZoneInfo("America/New_York")
 
-MEGACAP_PRESET = [
-    "NVDA",
-    "MSFT",
-    "AMZN",
-    "META",
-    "GOOGL",
-    "ORCL",
-    "AVGO",
-    "SPY",
-    "QQQ",
-    "IWM",
+PRESET_DEFAULTS = {
+    "Dashboard": AUTO_SYMBOLS,
+    "Neoclouds": NEOCLOUD_SYMBOLS,
+    "Mag 7": MAG7_SYMBOLS,
+    "Software": SOFTWARE_SYMBOLS,
+    "Index": INDEX_SYMBOLS,
+    "AI Photonics": AI_PHOTONICS_SYMBOLS,
+    "AI Fabless Semis": AI_FABLESS_SEMI_SYMBOLS,
+    "AI Memory": AI_MEMORY_SYMBOLS,
+    "AI Fabs": AI_FABS_SYMBOLS,
+    "Custom": [],
+}
+
+PRESET_COLOR_ORDER = [
+    "Neoclouds",
+    "Mag 7",
+    "Software",
+    "Index",
+    "AI Photonics",
+    "AI Fabless Semis",
+    "AI Memory",
+    "AI Fabs",
+    "Custom",
 ]
 
-PRESET_DEFAULTS = {
-    "AI / Semis + Indexes": AUTO_SYMBOLS,
-    "AI MegaCap": MEGACAP_PRESET,
-    "Custom": [],
+PRESET_COLORS = {
+    "Neoclouds": "#7A5AF8",
+    "Mag 7": "#2E90FA",
+    "Software": "#12B76A",
+    "Index": "#98A2B3",
+    "AI Photonics": "#F79009",
+    "AI Fabless Semis": "#F04438",
+    "AI Memory": "#EE46BC",
+    "AI Fabs": "#6172F3",
+    "Custom": "#667085",
+}
+
+PRIMARY_PRESET_BY_SYMBOL: dict[str, str] = {}
+for group_name in PRESET_COLOR_ORDER:
+    if group_name == "Custom":
+        continue
+    for group_symbol in PRESET_DEFAULTS[group_name]:
+        PRIMARY_PRESET_BY_SYMBOL.setdefault(group_symbol, group_name)
+
+REFERENCE_COLORS = {
+    "SPY": "#6CB6FF",
+    "QQQ": "#62C370",
+    "Pool avg": "#F5B942",
 }
 
 
@@ -93,7 +130,12 @@ def display_series(
 
 
 def preset_token(name: str) -> str:
-    return name.lower().replace("/", "_").replace(" ", "_").replace("+", "plus")
+    return (
+        name.lower()
+        .replace("/", "_")
+        .replace(" ", "_")
+        .replace("+", "plus")
+    )
 
 
 def preset_members_key(name: str) -> str:
@@ -114,6 +156,60 @@ def ensure_preset_state(name: str) -> list[str]:
         st.session_state[selection_key] = list(st.session_state[members_key])
 
     return list(st.session_state[members_key])
+
+
+def chart_group_for_symbol(symbol: str, active_preset: str) -> str:
+    if active_preset in PRESET_COLORS:
+        return active_preset
+    return PRIMARY_PRESET_BY_SYMBOL.get(symbol, "Custom")
+
+
+def attach_chart_groups(
+    cross: pd.DataFrame,
+    active_preset: str,
+) -> pd.DataFrame:
+    work = cross.copy()
+    work["preset_group"] = [
+        chart_group_for_symbol(str(symbol).upper(), active_preset)
+        for symbol in work["symbol"]
+    ]
+    return work
+
+
+def sort_cross_section(
+    cross: pd.DataFrame,
+    sort_mode: str,
+) -> pd.DataFrame:
+    if sort_mode == "Most positive first":
+        return cross.sort_values(
+            ["skew_25d", "symbol"],
+            ascending=[False, True],
+        )
+    if sort_mode == "Alphabetical":
+        return cross.sort_values("symbol")
+    if sort_mode == "Preset":
+        preset_rank = {
+            group: index
+            for index, group in enumerate(PRESET_COLOR_ORDER)
+        }
+        work = cross.copy()
+        work["_preset_rank"] = (
+            work["preset_group"]
+            .map(preset_rank)
+            .fillna(len(PRESET_COLOR_ORDER))
+        )
+        return (
+            work.sort_values(
+                ["_preset_rank", "skew_25d", "symbol"],
+                ascending=[True, True, True],
+            )
+            .drop(columns="_preset_rank")
+        )
+
+    return cross.sort_values(
+        ["skew_25d", "symbol"],
+        ascending=[True, True],
+    )
 
 
 def complete_for_requested_date(
@@ -151,24 +247,53 @@ def skew_cross_section_chart(cross: pd.DataFrame) -> alt.Chart:
     chart_data["skew_vol_pts"] = chart_data["skew_25d"] * 100.0
     chart_data["call_25d_iv_pct"] = chart_data["call_25d_iv"] * 100.0
     chart_data["put_25d_iv_pct"] = chart_data["put_25d_iv"] * 100.0
+    chart_data["zero"] = 0.0
 
-    symbol_order = chart_data["symbol"].tolist()
-    height = min(980, max(470, 31 * len(chart_data)))
+    label_width = max(
+        5,
+        int(chart_data["symbol"].astype(str).str.len().max()),
+    )
+    chart_data["symbol_label"] = [
+        f"{symbol:<{label_width}}  {skew:+.1f}"
+        for symbol, skew in zip(
+            chart_data["symbol"].astype(str),
+            chart_data["skew_vol_pts"],
+        )
+    ]
+
+    symbol_order = chart_data["symbol_label"].tolist()
+    height = min(1180, max(470, 30 * len(chart_data)))
+
+    present_groups = [
+        group
+        for group in PRESET_COLOR_ORDER
+        if group in set(chart_data["preset_group"])
+    ]
+    color_scale = alt.Scale(
+        domain=present_groups,
+        range=[PRESET_COLORS[group] for group in present_groups],
+    )
 
     x = alt.X(
-        "skew_vol_pts:Q",
+        "zero:Q",
         title="25Δ call IV − 25Δ put IV (vol points)",
         axis=alt.Axis(format=".1f"),
     )
     y = alt.Y(
-        "symbol:N",
+        "symbol_label:N",
         sort=symbol_order,
         title=None,
-        axis=alt.Axis(labelFontSize=13, labelLimit=120),
+        axis=alt.Axis(
+            labelFont="monospace",
+            labelFontSize=13,
+            labelLimit=190,
+            labelColor="#E8EDF7",
+        ),
     )
 
     tooltips = [
         alt.Tooltip("symbol:N", title="Ticker"),
+        alt.Tooltip("preset_group:N", title="Preset"),
         alt.Tooltip(
             "skew_vol_pts:Q",
             title="25Δ skew (vol pts)",
@@ -194,24 +319,33 @@ def skew_cross_section_chart(cross: pd.DataFrame) -> alt.Chart:
         alt.Tooltip("spot:Q", title="Spot", format="$.2f"),
     ]
 
-    base = alt.Chart(chart_data).encode(x=x, y=y)
-    bars = base.mark_bar(cornerRadiusEnd=4).encode(tooltip=tooltips)
+    bars = (
+        alt.Chart(chart_data)
+        .mark_bar(cornerRadiusEnd=5)
+        .encode(
+            x=x,
+            x2=alt.X2("skew_vol_pts:Q"),
+            y=y,
+            color=alt.Color(
+                "preset_group:N",
+                scale=color_scale,
+                legend=alt.Legend(
+                    title="Preset color",
+                    orient="right",
+                ),
+            ),
+            tooltip=tooltips,
+        )
+    )
 
     zero = (
         alt.Chart(pd.DataFrame({"value": [0.0]}))
-        .mark_rule(strokeWidth=1.2, opacity=0.65)
+        .mark_rule(
+            color="#FFFFFF",
+            strokeWidth=1.7,
+            opacity=0.95,
+        )
         .encode(x=alt.X("value:Q"))
-    )
-
-    positive_labels = (
-        base.transform_filter(alt.datum.skew_vol_pts >= 0)
-        .mark_text(align="left", dx=6, fontSize=12)
-        .encode(text=alt.Text("skew_vol_pts:Q", format="+.1f"))
-    )
-    negative_labels = (
-        base.transform_filter(alt.datum.skew_vol_pts < 0)
-        .mark_text(align="right", dx=-6, fontSize=12)
-        .encode(text=alt.Text("skew_vol_pts:Q", format="+.1f"))
     )
 
     reference_rows: list[dict[str, object]] = []
@@ -239,25 +373,21 @@ def skew_cross_section_chart(cross: pd.DataFrame) -> alt.Chart:
             }
         )
 
-    chart = bars + zero + positive_labels + negative_labels
+    chart = bars + zero
 
-    if reference_rows:
-        refs = pd.DataFrame(reference_rows)
-        ref_colors = alt.Scale(
-            domain=["SPY", "QQQ", "Pool avg"],
-            range=["#4C78A8", "#54A24B", "#ECA82C"],
-        )
+    for row_number, row in enumerate(reference_rows):
+        label_frame = pd.DataFrame([row])
+        ref_color = REFERENCE_COLORS[str(row["kind"])]
 
-        rules = (
-            alt.Chart(refs)
-            .mark_rule(strokeDash=[6, 5], strokeWidth=2)
+        rule = (
+            alt.Chart(label_frame)
+            .mark_rule(
+                color=ref_color,
+                strokeDash=[6, 5],
+                strokeWidth=2,
+            )
             .encode(
                 x=alt.X("value:Q"),
-                color=alt.Color(
-                    "kind:N",
-                    scale=ref_colors,
-                    legend=None,
-                ),
                 tooltip=[
                     alt.Tooltip("kind:N", title="Reference"),
                     alt.Tooltip(
@@ -268,30 +398,22 @@ def skew_cross_section_chart(cross: pd.DataFrame) -> alt.Chart:
                 ],
             )
         )
-        chart = chart + rules
-
-        for row_number, row in refs.reset_index(drop=True).iterrows():
-            label_frame = pd.DataFrame([row.to_dict()])
-            label_layer = (
-                alt.Chart(label_frame)
-                .mark_text(
-                    align="left",
-                    dx=5,
-                    fontSize=12,
-                    fontWeight="bold",
-                )
-                .encode(
-                    x=alt.X("value:Q"),
-                    y=alt.value(14 + 18 * row_number),
-                    text=alt.Text("label:N"),
-                    color=alt.Color(
-                        "kind:N",
-                        scale=ref_colors,
-                        legend=None,
-                    ),
-                )
+        label_layer = (
+            alt.Chart(label_frame)
+            .mark_text(
+                align="left",
+                dx=5,
+                fontSize=12,
+                fontWeight="bold",
+                color=ref_color,
             )
-            chart = chart + label_layer
+            .encode(
+                x=alt.X("value:Q"),
+                y=alt.value(14 + 18 * row_number),
+                text=alt.Text("label:N"),
+            )
+        )
+        chart = chart + rule + label_layer
 
     return (
         chart.properties(height=height)
@@ -334,8 +456,11 @@ st.caption(
     "Supabase only and does not consume MarketData credits."
 )
 
-if "iv_active_preset" not in st.session_state:
-    st.session_state["iv_active_preset"] = "AI / Semis + Indexes"
+if (
+    "iv_active_preset" not in st.session_state
+    or st.session_state["iv_active_preset"] not in PRESET_DEFAULTS
+):
+    st.session_state["iv_active_preset"] = "Dashboard"
 
 preset = (
     st.segmented_control(
@@ -343,7 +468,7 @@ preset = (
         list(PRESET_DEFAULTS),
         key="iv_active_preset",
     )
-    or "AI / Semis + Indexes"
+    or "Dashboard"
 )
 
 members = ensure_preset_state(preset)
@@ -397,7 +522,8 @@ selected = st.multiselect(
     placeholder="Add tickers above",
     help=(
         "Remove any chip to remove that ticker from the active preset. "
-        "The default AI/Semis basket already includes SPY, QQQ and IWM."
+        "Dashboard is the complete automatic daily basket; editing here only "
+        "changes this app session."
     ),
 )
 
@@ -405,7 +531,7 @@ if selected != members:
     st.session_state[members_key] = list(selected)
     members = list(selected)
 
-controls = st.columns([1, 1, 1.25, 1.6])
+controls = st.columns([1, 1.25, 1.25, 1.6])
 tenor = (
     controls[0].segmented_control(
         "Tenor",
@@ -416,7 +542,12 @@ tenor = (
 )
 sort_mode = controls[1].selectbox(
     "Cross-section sort",
-    ["Skew low → high", "Skew high → low", "Ticker"],
+    [
+        "Rank (low → high)",
+        "Alphabetical",
+        "Preset",
+        "Most positive first",
+    ],
 )
 history_period = (
     controls[2].segmented_control(
@@ -432,8 +563,8 @@ manual_request = controls[3].button(
     width="stretch",
     help=(
         "Checks Supabase first. Already-saved tickers use 0 MarketData "
-        "credits. Missing tickers use one narrow 25Δ request each and save "
-        "both 1W and 1M."
+        "credits. Missing tickers use the same bounded historical-chain path "
+        "as the daily task and save both 1W and 1M."
     ),
 )
 
@@ -475,13 +606,9 @@ if manual_request:
 
             for index, symbol in enumerate(missing, start=1):
                 try:
-                    result = client.fetch_chain(
+                    result = client.fetch_skew_chain(
                         symbol,
                         requested_date,
-                        min_dte=0,
-                        max_dte=45,
-                        min_open_interest=0,
-                        delta_filter="0.25",
                     )
                     snapshots = skew_snapshots_from_chain(
                         symbol,
@@ -514,7 +641,7 @@ if manual_request:
                     "Some tickers failed:\n\n" + "\n\n".join(failures)
                 )
 
-st.subheader("25Δ Put/Call Skew — AI pool + indexes")
+st.subheader(f"25Δ Put/Call Skew — {preset}")
 
 if not store.enabled:
     st.info("Configure Supabase to load saved IV/skew history.")
@@ -536,20 +663,15 @@ else:
         cross = latest.dropna(
             subset=["skew_25d", "call_25d_iv", "put_25d_iv"]
         ).copy()
-
-        if sort_mode == "Skew high → low":
-            cross = cross.sort_values("skew_25d", ascending=False)
-        elif sort_mode == "Skew low → high":
-            cross = cross.sort_values("skew_25d")
-        else:
-            cross = cross.sort_values("symbol")
+        cross = attach_chart_groups(cross, preset)
+        cross = sort_cross_section(cross, sort_mode)
 
         newest = cross["snapshot_date"].max() if not cross.empty else None
         if newest is not None:
             st.caption(
                 f"Latest saved session shown: {newest}. "
-                "SPY and QQQ dashed references plus the equal-weight stock-pool "
-                "average are calculated from the displayed rows."
+                "SPY and QQQ dashed references plus the equal-weight displayed "
+                "non-index average are calculated from the displayed rows."
             )
 
         stale = (
@@ -569,15 +691,17 @@ else:
         )
 
         st.caption(
-            "Bars include SPY, QQQ and IWM. Dashed lines mark SPY, QQQ and "
-            "the equal-weight average of the non-index pool. Hover any bar for "
-            "25Δ call IV, 25Δ put IV, skew, DTE, expiration, spot and date."
+            "Bar colors identify presets; the legend shows the color mapping. "
+            "Ticker and skew value are aligned together on the left. Dashed "
+            "lines mark SPY, QQQ and the equal-weight average of displayed "
+            "non-index stocks. The white vertical line is zero skew."
         )
 
         with st.expander("Cross-section details"):
             details = cross[
                 [
                     "symbol",
+                    "preset_group",
                     "snapshot_date",
                     "actual_dte",
                     "expiration",
@@ -598,6 +722,7 @@ else:
             details = details.rename(
                 columns={
                     "symbol": "Ticker",
+                    "preset_group": "Preset",
                     "snapshot_date": "Date",
                     "actual_dte": "DTE",
                     "expiration": "Expiration",
@@ -679,13 +804,14 @@ st.divider()
 
 with st.expander("Method & API-credit behavior"):
     st.markdown(
-        """
+        f"""
 - **25Δ skew:** `25Δ call IV − 25Δ put IV`, in volatility points.
+- **Daily basket:** Dashboard contains all **{len(AUTO_SYMBOLS)}** symbols run by the automatic daily task.
 - **Daily tenors:** 1W and 1M target 7 and 30 DTE and use the available expiration closest to each target.
 - **Pool average:** equal-weight average of the displayed non-index stocks. SPY, QQQ and IWM are excluded from the pool average.
-- **Reference lines:** SPY and QQQ are displayed both as normal bars and as dashed benchmark lines.
+- **Reference lines:** SPY and QQQ are displayed both as normal bars and as dashed benchmark lines when they are in the selection.
 - **Automatic data:** GitHub Actions writes the saved daily rows to Supabase. Opening this Streamlit page does **not** call MarketData.
-- **Manual button:** checks Supabase first. A ticker already saved for the requested session consumes **0 MarketData credits**. A missing ticker uses one narrow request filtered to ~25Δ contracts, then derives both 1W and 1M locally.
+- **Manual button:** checks Supabase first. A ticker already saved for the requested session consumes **0 MarketData credits**. A missing ticker uses the same bounded historical-chain request as the automatic task, then derives missing IV/delta locally and produces both 1W and 1M from that one chain.
 - **Storage:** Supabase stores the compact daily rows needed for the chart: spot, target/actual DTE, expiration, 25Δ call IV, 25Δ put IV and 25Δ skew. Raw option chains are not stored.
         """
     )
