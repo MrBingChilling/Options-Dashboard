@@ -1,0 +1,38 @@
+name: Daily 25D skew snapshot
+
+on:
+  schedule:
+    - cron: "10 7 * * 1-5"
+      timezone: "America/Vancouver"
+  workflow_dispatch:
+
+concurrency:
+  group: daily-25d-skew
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Collect latest historical 25D skew
+        env:
+          PYTHONUNBUFFERED: "1"
+          MARKETDATA_TOKEN: ${{ secrets.MARKETDATA_TOKEN }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: python -u scripts/daily_skew.py

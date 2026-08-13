@@ -9,55 +9,42 @@ import streamlit as st
 
 from src.config import get_setting
 from src.marketdata_client import MarketDataClient, MarketDataError
+from src.skew_collector import (
+    AI_POOL_SYMBOLS,
+    AUTO_SYMBOLS,
+    DAILY_TENORS,
+    INDEX_SYMBOLS,
+    previous_weekday,
+    skew_snapshots_from_chain,
+)
 from src.storage import SnapshotStore, SnapshotStoreError
-from src.volatility import TENORS, snapshot_from_chain
-from src.volatility_storage import latest_volatility, save_volatility_snapshot, volatility_history
+from src.volatility_storage import (
+    latest_volatility,
+    save_volatility_snapshots,
+    volatility_history,
+)
 
 
 EASTERN = ZoneInfo("America/New_York")
 
-# Match the Herman Jin reference pool supplied by the user.
-SEMIS_PRESET = [
-    "AEHR",
-    "STM",
-    "AXTI",
-    "ANET",
+MEGACAP_PRESET = [
     "NVDA",
-    "ON",
-    "SNDK",
-    "KLAC",
+    "MSFT",
+    "AMZN",
+    "META",
+    "GOOGL",
+    "ORCL",
     "AVGO",
-    "CIEN",
-    "AAOI",
-    "COHR",
-    "GFS",
-    "LITE",
-    "NOK",
-    "AMD",
-    "LRCX",
-    "AMAT",
-    "WOLF",
-    "MU",
-    "INTC",
-    "SKHY",
-    "CBRS",
-    "ASML",
+    "SPY",
+    "QQQ",
+    "IWM",
 ]
-AI_PRESET = ["NVDA", "AVGO", "AMD", "MU", "MSFT", "META", "AMZN", "GOOG", "ORCL", "CRWV", "NBIS"]
-INDEX_PRESET = ["SPY", "QQQ", "IWM"]
+
 PRESET_DEFAULTS = {
-    "AI / Semis": SEMIS_PRESET,
-    "AI MegaCap": AI_PRESET,
-    "Indexes": INDEX_PRESET,
+    "AI / Semis + Indexes": AUTO_SYMBOLS,
+    "AI MegaCap": MEGACAP_PRESET,
     "Custom": [],
 }
-
-
-def previous_weekday(value: date) -> date:
-    candidate = value - timedelta(days=1)
-    while candidate.weekday() >= 5:
-        candidate -= timedelta(days=1)
-    return candidate
 
 
 def normalize_symbols(text: str) -> list[str]:
@@ -73,9 +60,12 @@ def history_start(period: str, end_date: date) -> date | None:
     return end_date - timedelta(days=days[period]) if period in days else None
 
 
-def display_series(history: pd.DataFrame, metric: str, change_mode: str) -> tuple[pd.DataFrame, str]:
+def display_series(
+    history: pd.DataFrame,
+    metric: str,
+    change_mode: str,
+) -> tuple[pd.DataFrame, str]:
     metric_map = {
-        "ATM IV": "atm_iv",
         "25Δ Call IV": "call_25d_iv",
         "25Δ Put IV": "put_25d_iv",
         "25Δ Skew": "skew_25d",
@@ -90,16 +80,20 @@ def display_series(history: pd.DataFrame, metric: str, change_mode: str) -> tupl
         work["value"] = work.groupby("symbol")["value"].diff(periods)
         ylabel = "Change (vol points)"
     elif metric == "25Δ Skew":
-        ylabel = "Call IV − put IV (vol points)"
+        ylabel = "25Δ call IV − 25Δ put IV (vol points)"
     else:
         ylabel = "Implied volatility (%)"
 
-    pivot = work.pivot(index="snapshot_date", columns="symbol", values="value").sort_index()
+    pivot = work.pivot(
+        index="snapshot_date",
+        columns="symbol",
+        values="value",
+    ).sort_index()
     return pivot, ylabel
 
 
 def preset_token(name: str) -> str:
-    return name.lower().replace("/", "_").replace(" ", "_")
+    return name.lower().replace("/", "_").replace(" ", "_").replace("+", "plus")
 
 
 def preset_members_key(name: str) -> str:
@@ -113,11 +107,43 @@ def preset_selection_key(name: str) -> str:
 def ensure_preset_state(name: str) -> list[str]:
     members_key = preset_members_key(name)
     selection_key = preset_selection_key(name)
+
     if members_key not in st.session_state:
         st.session_state[members_key] = list(PRESET_DEFAULTS[name])
     if selection_key not in st.session_state:
         st.session_state[selection_key] = list(st.session_state[members_key])
+
     return list(st.session_state[members_key])
+
+
+def complete_for_requested_date(
+    store: SnapshotStore,
+    symbols: list[str],
+    session_date: date,
+) -> set[str]:
+    complete: dict[str, set[str]] = {symbol: set() for symbol in symbols}
+
+    for check_tenor in DAILY_TENORS:
+        frame = latest_volatility(store, symbols, check_tenor)
+        if frame.empty:
+            continue
+
+        work = frame.copy()
+        work["snapshot_date"] = pd.to_datetime(
+            work["snapshot_date"], errors="coerce"
+        ).dt.date
+
+        for symbol in work.loc[
+            work["snapshot_date"] == session_date, "symbol"
+        ].astype(str):
+            complete.setdefault(symbol.upper(), set()).add(check_tenor)
+
+    needed = set(DAILY_TENORS)
+    return {
+        symbol
+        for symbol, saved_tenors in complete.items()
+        if needed.issubset(saved_tenors)
+    }
 
 
 def skew_cross_section_chart(cross: pd.DataFrame) -> alt.Chart:
@@ -125,39 +151,58 @@ def skew_cross_section_chart(cross: pd.DataFrame) -> alt.Chart:
     chart_data["skew_vol_pts"] = chart_data["skew_25d"] * 100.0
     chart_data["call_25d_iv_pct"] = chart_data["call_25d_iv"] * 100.0
     chart_data["put_25d_iv_pct"] = chart_data["put_25d_iv"] * 100.0
-    chart_data["atm_iv_pct"] = chart_data["atm_iv"] * 100.0
 
     symbol_order = chart_data["symbol"].tolist()
-    y = alt.Y(
-        "symbol:N",
-        sort=symbol_order,
-        title=None,
-        axis=alt.Axis(labelFontSize=13, labelLimit=110),
-    )
+    height = min(980, max(470, 31 * len(chart_data)))
+
     x = alt.X(
         "skew_vol_pts:Q",
         title="25Δ call IV − 25Δ put IV (vol points)",
         axis=alt.Axis(format=".1f"),
     )
+    y = alt.Y(
+        "symbol:N",
+        sort=symbol_order,
+        title=None,
+        axis=alt.Axis(labelFontSize=13, labelLimit=120),
+    )
+
     tooltips = [
         alt.Tooltip("symbol:N", title="Ticker"),
-        alt.Tooltip("skew_vol_pts:Q", title="25Δ skew (vol pts)", format="+.2f"),
-        alt.Tooltip("call_25d_iv_pct:Q", title="25Δ call IV (%)", format=".2f"),
-        alt.Tooltip("put_25d_iv_pct:Q", title="25Δ put IV (%)", format=".2f"),
-        alt.Tooltip("atm_iv_pct:Q", title="ATM IV (%)", format=".2f"),
+        alt.Tooltip(
+            "skew_vol_pts:Q",
+            title="25Δ skew (vol pts)",
+            format="+.2f",
+        ),
+        alt.Tooltip(
+            "call_25d_iv_pct:Q",
+            title="25Δ call IV (%)",
+            format=".2f",
+        ),
+        alt.Tooltip(
+            "put_25d_iv_pct:Q",
+            title="25Δ put IV (%)",
+            format=".2f",
+        ),
         alt.Tooltip("actual_dte:Q", title="Actual DTE", format=".0f"),
         alt.Tooltip("expiration:T", title="Expiration", format="%Y-%m-%d"),
-        alt.Tooltip("snapshot_date:T", title="Snapshot", format="%Y-%m-%d"),
+        alt.Tooltip(
+            "snapshot_date:T",
+            title="Snapshot",
+            format="%Y-%m-%d",
+        ),
         alt.Tooltip("spot:Q", title="Spot", format="$.2f"),
     ]
 
-    base = alt.Chart(chart_data).encode(y=y, x=x)
+    base = alt.Chart(chart_data).encode(x=x, y=y)
     bars = base.mark_bar(cornerRadiusEnd=4).encode(tooltip=tooltips)
+
     zero = (
-        alt.Chart(pd.DataFrame({"zero": [0.0]}))
+        alt.Chart(pd.DataFrame({"value": [0.0]}))
         .mark_rule(strokeWidth=1.2, opacity=0.65)
-        .encode(x=alt.X("zero:Q"))
+        .encode(x=alt.X("value:Q"))
     )
+
     positive_labels = (
         base.transform_filter(alt.datum.skew_vol_pts >= 0)
         .mark_text(align="left", dx=6, fontSize=12)
@@ -168,46 +213,139 @@ def skew_cross_section_chart(cross: pd.DataFrame) -> alt.Chart:
         .mark_text(align="right", dx=-6, fontSize=12)
         .encode(text=alt.Text("skew_vol_pts:Q", format="+.1f"))
     )
-    height = min(920, max(430, 31 * len(chart_data)))
+
+    reference_rows: list[dict[str, object]] = []
+
+    for symbol in ("SPY", "QQQ"):
+        match = chart_data[chart_data["symbol"] == symbol]
+        if not match.empty:
+            value = float(match.iloc[0]["skew_vol_pts"])
+            reference_rows.append(
+                {
+                    "kind": symbol,
+                    "value": value,
+                    "label": f"{symbol} {value:+.1f}",
+                }
+            )
+
+    pool = chart_data[~chart_data["symbol"].isin(INDEX_SYMBOLS)]
+    if not pool.empty:
+        pool_value = float(pool["skew_vol_pts"].mean())
+        reference_rows.append(
+            {
+                "kind": "Pool avg",
+                "value": pool_value,
+                "label": f"Pool avg {pool_value:+.1f}",
+            }
+        )
+
+    chart = bars + zero + positive_labels + negative_labels
+
+    if reference_rows:
+        refs = pd.DataFrame(reference_rows)
+        ref_colors = alt.Scale(
+            domain=["SPY", "QQQ", "Pool avg"],
+            range=["#4C78A8", "#54A24B", "#ECA82C"],
+        )
+
+        rules = (
+            alt.Chart(refs)
+            .mark_rule(strokeDash=[6, 5], strokeWidth=2)
+            .encode(
+                x=alt.X("value:Q"),
+                color=alt.Color(
+                    "kind:N",
+                    scale=ref_colors,
+                    legend=None,
+                ),
+                tooltip=[
+                    alt.Tooltip("kind:N", title="Reference"),
+                    alt.Tooltip(
+                        "value:Q",
+                        title="Skew (vol pts)",
+                        format="+.2f",
+                    ),
+                ],
+            )
+        )
+        chart = chart + rules
+
+        for row_number, row in refs.reset_index(drop=True).iterrows():
+            label_frame = pd.DataFrame([row.to_dict()])
+            label_layer = (
+                alt.Chart(label_frame)
+                .mark_text(
+                    align="left",
+                    dx=5,
+                    fontSize=12,
+                    fontWeight="bold",
+                )
+                .encode(
+                    x=alt.X("value:Q"),
+                    y=alt.value(14 + 18 * row_number),
+                    text=alt.Text("label:N"),
+                    color=alt.Color(
+                        "kind:N",
+                        scale=ref_colors,
+                        legend=None,
+                    ),
+                )
+            )
+            chart = chart + label_layer
+
     return (
-        (bars + zero + positive_labels + negative_labels)
-        .properties(height=height)
+        chart.properties(height=height)
         .configure_view(stroke=None)
     )
 
 
-st.set_page_config(page_title="IV & Skew", page_icon="↕", layout="wide")
+st.set_page_config(
+    page_title="IV & Skew",
+    page_icon="↕",
+    layout="wide",
+)
+
 st.markdown(
-    '''
+    """
     <style>
-      .block-container {padding-top: 1.2rem; padding-bottom: 3rem; max-width: 1500px;}
-      [data-testid="stMetric"] {background: #141B2D; border: 1px solid #25304A; padding: .8rem; border-radius: .8rem;}
+      .block-container {
+        padding-top: 1.2rem;
+        padding-bottom: 3rem;
+        max-width: 1500px;
+      }
       .muted {color: #A8B3C7;}
     </style>
-    ''',
+    """,
     unsafe_allow_html=True,
 )
 
 marketdata_token = get_setting("MARKETDATA_TOKEN", "")
 store = SnapshotStore(
     get_setting("SUPABASE_URL", ""),
-    get_setting("SUPABASE_SECRET_KEY", get_setting("SUPABASE_SERVICE_ROLE_KEY", "")),
+    get_setting(
+        "SUPABASE_SECRET_KEY",
+        get_setting("SUPABASE_SERVICE_ROLE_KEY", ""),
+    ),
 )
 
 st.title("IV & Skew")
 st.caption(
-    "Herman Jin-style cross-sectional 25Δ call/put skew plus constant-tenor IV and skew history. "
-    "Positive skew means 25Δ upside calls carry higher IV than comparable 25Δ puts."
+    "Saved daily 25Δ call/put skew. Opening or refreshing this page reads "
+    "Supabase only and does not consume MarketData credits."
 )
 
 if "iv_active_preset" not in st.session_state:
-    st.session_state["iv_active_preset"] = "AI / Semis"
+    st.session_state["iv_active_preset"] = "AI / Semis + Indexes"
 
-preset = st.segmented_control(
-    "Ticker preset",
-    list(PRESET_DEFAULTS),
-    key="iv_active_preset",
-) or "AI / Semis"
+preset = (
+    st.segmented_control(
+        "Ticker preset",
+        list(PRESET_DEFAULTS),
+        key="iv_active_preset",
+    )
+    or "AI / Semis + Indexes"
+)
+
 members = ensure_preset_state(preset)
 members_key = preset_members_key(preset)
 selection_key = preset_selection_key(preset)
@@ -216,10 +354,14 @@ add_col, add_button_col, reset_col = st.columns([5.0, 1.15, 1.1])
 custom_text = add_col.text_input(
     "Add tickers to this preset",
     value="",
-    placeholder="e.g. CBRS, AEHR, AXTI",
-    help="Comma- or space-separated. Added tickers become members of the preset currently selected above.",
+    placeholder="e.g. ORCL, CRWV, NBIS",
+    help=(
+        "Comma- or space-separated. Added tickers are inserted directly into "
+        "the active preset for this app session."
+    ),
     key=f"iv_add_tickers_{preset_token(preset)}",
 )
+
 add_clicked = add_button_col.button(
     "Add",
     width="stretch",
@@ -253,62 +395,127 @@ selected = st.multiselect(
     options=members,
     key=selection_key,
     placeholder="Add tickers above",
-    help="Remove any chip to delete that ticker from this preset. Additions and deletions apply directly to the active preset for this app session.",
+    help=(
+        "Remove any chip to remove that ticker from the active preset. "
+        "The default AI/Semis basket already includes SPY, QQQ and IWM."
+    ),
 )
+
 if selected != members:
     st.session_state[members_key] = list(selected)
     members = list(selected)
 
-controls = st.columns([1, 1, 1.25, 1.2])
-tenor = controls[0].segmented_control("Tenor", list(TENORS), default="1M") or "1M"
+controls = st.columns([1, 1, 1.25, 1.6])
+tenor = (
+    controls[0].segmented_control(
+        "Tenor",
+        list(DAILY_TENORS),
+        default="1M",
+    )
+    or "1M"
+)
 sort_mode = controls[1].selectbox(
     "Cross-section sort",
     ["Skew low → high", "Skew high → low", "Ticker"],
 )
-history_period = controls[2].segmented_control(
-    "History", ["1M", "3M", "6M", "1Y", "Max"], default="6M"
-) or "6M"
-refresh = controls[3].button(
-    "Refresh selected from MarketData",
+history_period = (
+    controls[2].segmented_control(
+        "History",
+        ["1M", "3M", "6M", "1Y", "Max"],
+        default="6M",
+    )
+    or "6M"
+)
+manual_request = controls[3].button(
+    "Request missing selected from MarketData",
     type="primary",
     width="stretch",
+    help=(
+        "Checks Supabase first. Already-saved tickers use 0 MarketData "
+        "credits. Missing tickers use one narrow 25Δ request each and save "
+        "both 1W and 1M."
+    ),
 )
 
-if refresh:
+if manual_request:
     if not marketdata_token:
         st.error("MARKETDATA_TOKEN is not configured.")
     elif not store.enabled:
-        st.error("Supabase is not configured, so refreshed volatility rows cannot be saved.")
+        st.error("Supabase is not configured.")
     elif not selected:
         st.warning("Select at least one ticker.")
     else:
-        client = MarketDataClient(marketdata_token)
-        target_dte = TENORS[tenor]
         requested_date = previous_weekday(datetime.now(EASTERN).date())
-        progress = st.progress(0.0, text="Refreshing IV/skew…")
-        failures: list[str] = []
-        for index, symbol in enumerate(selected, start=1):
-            try:
-                result = client.fetch_chain(
-                    symbol,
-                    requested_date,
-                    min_dte=max(0, target_dte - 10),
-                    max_dte=target_dte + 20,
-                    min_open_interest=0,
-                    delta_filter="0.50,0.25",
-                )
-                snap = snapshot_from_chain(symbol, result.data, result.snapshot_date, tenor)
-                save_volatility_snapshot(store, snap)
-            except (MarketDataError, SnapshotStoreError, ValueError) as exc:
-                failures.append(f"{symbol}: {exc}")
-            progress.progress(index / len(selected), text=f"Refreshed {index}/{len(selected)}")
-        progress.empty()
-        if failures:
-            st.warning("Some tickers failed:\n\n" + "\n\n".join(failures))
-        else:
-            st.toast("IV/skew snapshots refreshed")
 
-st.subheader("25Δ Put/Call Skew — cross section")
+        try:
+            complete = complete_for_requested_date(
+                store,
+                selected,
+                requested_date,
+            )
+        except SnapshotStoreError as exc:
+            complete = set()
+            st.error(f"Could not check Supabase: {exc}")
+
+        missing = [symbol for symbol in selected if symbol not in complete]
+
+        if not missing:
+            st.success(
+                f"All selected tickers already have 1W + 1M data for "
+                f"{requested_date}. MarketData requests: 0."
+            )
+        else:
+            client = MarketDataClient(marketdata_token)
+            progress = st.progress(
+                0.0,
+                text=f"{len(missing)} ticker(s) need MarketData…",
+            )
+            failures: list[str] = []
+            saved = 0
+
+            for index, symbol in enumerate(missing, start=1):
+                try:
+                    result = client.fetch_chain(
+                        symbol,
+                        requested_date,
+                        min_dte=0,
+                        max_dte=45,
+                        min_open_interest=0,
+                        delta_filter="0.25",
+                    )
+                    snapshots = skew_snapshots_from_chain(
+                        symbol,
+                        result.snapshot_date,
+                        result.data,
+                    )
+                    save_volatility_snapshots(store, snapshots)
+                    saved += 1
+                except (
+                    MarketDataError,
+                    SnapshotStoreError,
+                    ValueError,
+                ) as exc:
+                    failures.append(f"{symbol}: {exc}")
+
+                progress.progress(
+                    index / len(missing),
+                    text=f"Processed {index}/{len(missing)}",
+                )
+
+            progress.empty()
+
+            if saved:
+                st.success(
+                    f"Saved {saved} ticker(s). "
+                    f"Skipped {len(complete)} already-complete ticker(s)."
+                )
+            if failures:
+                st.warning(
+                    "Some tickers failed:\n\n" + "\n\n".join(failures)
+                )
+
+st.subheader("25Δ Put/Call Skew — AI pool + indexes")
+
 if not store.enabled:
     st.info("Configure Supabase to load saved IV/skew history.")
 elif not selected:
@@ -322,11 +529,14 @@ else:
 
     if latest.empty:
         st.info(
-            "No saved volatility snapshots yet. Use **Refresh selected from MarketData** "
-            "or run the daily snapshot workflow after applying the schema update."
+            "No saved skew snapshots yet. The scheduled GitHub workflow will "
+            "populate this automatically, or use the manual request button."
         )
     else:
-        cross = latest.dropna(subset=["skew_25d"]).copy()
+        cross = latest.dropna(
+            subset=["skew_25d", "call_25d_iv", "put_25d_iv"]
+        ).copy()
+
         if sort_mode == "Skew high → low":
             cross = cross.sort_values("skew_25d", ascending=False)
         elif sort_mode == "Skew low → high":
@@ -335,18 +545,33 @@ else:
             cross = cross.sort_values("symbol")
 
         newest = cross["snapshot_date"].max() if not cross.empty else None
-        stale = cross[cross["snapshot_date"] < newest] if newest is not None else pd.DataFrame()
-        if not stale.empty:
+        if newest is not None:
             st.caption(
-                "Some tickers use an older available options session; hover or check the table below "
-                "for each snapshot date."
+                f"Latest saved session shown: {newest}. "
+                "SPY and QQQ dashed references plus the equal-weight stock-pool "
+                "average are calculated from the displayed rows."
             )
 
-        st.altair_chart(skew_cross_section_chart(cross), use_container_width=True)
+        stale = (
+            cross[cross["snapshot_date"] < newest]
+            if newest is not None
+            else pd.DataFrame()
+        )
+        if not stale.empty:
+            st.caption(
+                "Some tickers use an older available session; hover a bar or "
+                "open details to see each snapshot date."
+            )
+
+        st.altair_chart(
+            skew_cross_section_chart(cross),
+            use_container_width=True,
+        )
+
         st.caption(
-            "Above zero = upside 25Δ calls are richer than downside 25Δ puts. "
-            "Below zero = downside puts are richer. Hover any bar for call IV, put IV, ATM IV, DTE, "
-            "expiration, spot, and snapshot date."
+            "Bars include SPY, QQQ and IWM. Dashed lines mark SPY, QQQ and "
+            "the equal-weight average of the non-index pool. Hover any bar for "
+            "25Δ call IV, 25Δ put IV, skew, DTE, expiration, spot and date."
         )
 
         with st.expander("Cross-section details"):
@@ -357,25 +582,54 @@ else:
                     "actual_dte",
                     "expiration",
                     "spot",
-                    "atm_iv",
                     "call_25d_iv",
                     "put_25d_iv",
                     "skew_25d",
                 ]
             ].copy()
-            for column in ("atm_iv", "call_25d_iv", "put_25d_iv", "skew_25d"):
+
+            for column in (
+                "call_25d_iv",
+                "put_25d_iv",
+                "skew_25d",
+            ):
                 details[column] = details[column] * 100.0
-            st.dataframe(details, hide_index=True, width="stretch")
+
+            details = details.rename(
+                columns={
+                    "symbol": "Ticker",
+                    "snapshot_date": "Date",
+                    "actual_dte": "DTE",
+                    "expiration": "Expiration",
+                    "spot": "Spot",
+                    "call_25d_iv": "25Δ Call IV %",
+                    "put_25d_iv": "25Δ Put IV %",
+                    "skew_25d": "25Δ Skew vol pts",
+                }
+            )
+            st.dataframe(
+                details,
+                hide_index=True,
+                width="stretch",
+            )
 
 st.divider()
-st.subheader("Historical implied volatility & skew")
+st.subheader("Historical 25Δ IV & skew")
+
 history_controls = st.columns([1.4, 1, 2.2])
 metric = history_controls[0].selectbox(
-    "Metric", ["ATM IV", "25Δ Call IV", "25Δ Put IV", "25Δ Skew"], index=0
+    "Metric",
+    ["25Δ Skew", "25Δ Call IV", "25Δ Put IV"],
+    index=0,
 )
-change_mode = history_controls[1].segmented_control(
-    "View", ["Level", "1D Δ", "1W Δ", "1M Δ"], default="Level"
-) or "Level"
+change_mode = (
+    history_controls[1].segmented_control(
+        "View",
+        ["Level", "1D Δ", "1W Δ", "1M Δ"],
+        default="Level",
+    )
+    or "Level"
+)
 history_symbols = history_controls[2].multiselect(
     "Historical tickers",
     options=selected,
@@ -386,6 +640,7 @@ history_symbols = history_controls[2].multiselect(
 if store.enabled and history_symbols:
     end_date = datetime.now(EASTERN).date()
     start_date = history_start(history_period, end_date)
+
     try:
         hist = volatility_history(
             store,
@@ -397,43 +652,40 @@ if store.enabled and history_symbols:
     except SnapshotStoreError as exc:
         hist = pd.DataFrame()
         st.error(str(exc))
+
     if hist.empty:
         st.info(
-            "No history is stored for this selection yet. Daily snapshots will populate it, "
-            "or run the historical backfill workflow."
+            "No history is stored for this selection yet. Daily scheduled "
+            "snapshots will build it automatically."
         )
     else:
-        chart_data, ylabel = display_series(hist, metric, change_mode)
-        st.line_chart(chart_data, height=460, use_container_width=True)
-        st.caption(ylabel + f" · constant-tenor target: {tenor} ({TENORS[tenor]} DTE).")
-
-        latest_hist = (
-            hist.sort_values("snapshot_date").groupby("symbol", as_index=False).tail(1)
+        chart_data, ylabel = display_series(
+            hist,
+            metric,
+            change_mode,
         )
-        summary_cols = st.columns(min(4, len(latest_hist))) if len(latest_hist) else []
-        metric_col = {
-            "ATM IV": "atm_iv",
-            "25Δ Call IV": "call_25d_iv",
-            "25Δ Put IV": "put_25d_iv",
-            "25Δ Skew": "skew_25d",
-        }[metric]
-        for col, row in zip(summary_cols, latest_hist.itertuples(index=False)):
-            value = getattr(row, metric_col)
-            label_value = "—" if pd.isna(value) else f"{value * 100:.1f}"
-            suffix = " vol pts" if metric == "25Δ Skew" else "%"
-            col.metric(row.symbol, label_value + suffix)
+        st.line_chart(
+            chart_data,
+            height=460,
+            use_container_width=True,
+        )
+        st.caption(
+            ylabel
+            + f" · target tenor: {tenor} "
+            + f"({DAILY_TENORS[tenor]} DTE)."
+        )
 
 st.divider()
-with st.expander("Method"):
-    st.markdown(
-        '''
-- **Constant tenor:** 1W/1M/3M/6M targets 7/30/90/180 DTE and uses the available expiration closest to that target.
-- **ATM IV:** average IV of the nearest-to-50Δ call and put for the selected expiration when using the credit-efficient filtered request.
-- **25Δ call IV:** IV of the call whose delta is closest to +0.25.
-- **25Δ put IV:** IV of the put whose delta is closest to −0.25.
-- **25Δ skew:** `25Δ call IV − 25Δ put IV`, shown in volatility points.
-- **Historical changes:** 1D/1W/1M changes use 1/5/21 stored trading observations respectively.
 
-Supabase stores the derived constant-tenor snapshot fields needed by this page: spot, target/actual DTE, expiration, ATM IV, 25Δ call IV, 25Δ put IV, and 25Δ skew. The full raw option-chain payload is not stored.
-        '''
+with st.expander("Method & API-credit behavior"):
+    st.markdown(
+        """
+- **25Δ skew:** `25Δ call IV − 25Δ put IV`, in volatility points.
+- **Daily tenors:** 1W and 1M target 7 and 30 DTE and use the available expiration closest to each target.
+- **Pool average:** equal-weight average of the displayed non-index stocks. SPY, QQQ and IWM are excluded from the pool average.
+- **Reference lines:** SPY and QQQ are displayed both as normal bars and as dashed benchmark lines.
+- **Automatic data:** GitHub Actions writes the saved daily rows to Supabase. Opening this Streamlit page does **not** call MarketData.
+- **Manual button:** checks Supabase first. A ticker already saved for the requested session consumes **0 MarketData credits**. A missing ticker uses one narrow request filtered to ~25Δ contracts, then derives both 1W and 1M locally.
+- **Storage:** Supabase stores the compact daily rows needed for the chart: spot, target/actual DTE, expiration, 25Δ call IV, 25Δ put IV and 25Δ skew. Raw option chains are not stored.
+        """
     )
