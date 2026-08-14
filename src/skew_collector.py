@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import replace
 from datetime import date, timedelta
 
 import pandas as pd
@@ -160,6 +159,6 @@ def skew_snapshots_from_chain(
             or snapshot.skew_25d is None
         ):
             raise ValueError(f"{tenor} has no usable 25D call/put IV pair.")
-        snapshots.append(replace(snapshot, atm_iv=None))
+        snapshots.append(snapshot)
 
     return snapshots
