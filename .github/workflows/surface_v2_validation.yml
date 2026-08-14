@@ -1,4 +1,4 @@
-name: Validate surface v2 storage
+name: Finish surface v2 history backfill
 
 on:
   pull_request:
@@ -11,13 +11,13 @@ permissions:
   contents: read
 
 concurrency:
-  group: validate-surface-v2-storage
-  cancel-in-progress: true
+  group: finish-surface-v2-history-backfill
+  cancel-in-progress: false
 
 jobs:
-  validate:
+  backfill:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 360
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -31,10 +31,10 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run unit tests
+      - name: Run surface storage tests
         run: PYTHONPATH=. pytest -q --ignore=tests/test_app_smoke.py
 
-      - name: Fetch and persist exactly one missing ticker-day
+      - name: Resume remaining historical data only
         env:
           PYTHONUNBUFFERED: "1"
           MARKETDATA_TOKEN: ${{ secrets.MARKETDATA_TOKEN }}
@@ -46,6 +46,6 @@ jobs:
             --symbols AUTO \
             --start 2025-08-13 \
             --end 2026-08-12 \
-            --max-requests 1 \
+            --max-requests 9000 \
             --credit-reserve 100 \
             --probe-symbol SPY
