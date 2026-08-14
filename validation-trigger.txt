@@ -1,1 +1,1 @@
-Trigger the remaining surface-v2 historical backfill after successful one-request validation.
+Pause the active surface-v2 historical backfill while the GEX-capable archive and credit-priority collector are upgraded.
