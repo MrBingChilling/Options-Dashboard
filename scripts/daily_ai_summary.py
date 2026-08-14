@@ -17,7 +17,7 @@ from src.volatility_storage import volatility_history
 
 
 EASTERN = ZoneInfo("America/New_York")
-LOOKBACK_DAYS = 21
+LOOKBACK_DAYS = 75
 
 
 def _store() -> SnapshotStore:
@@ -44,7 +44,7 @@ def main() -> int:
                 tenor,
                 start_date=start_date,
                 end_date=end_date,
-                limit=max(1000, len(AUTO_SYMBOLS) * 40),
+                limit=max(5000, len(AUTO_SYMBOLS) * 100),
             )
             if not frame.empty:
                 frames.append(frame)
@@ -69,6 +69,8 @@ def main() -> int:
         f"[summary-saved] session={summary.snapshot_date} "
         f"comparison={summary.comparison_date} coverage="
         f"{summary.symbol_count}/{summary.expected_symbol_count} "
+        f"week_comparison={summary.week_comparison_date} "
+        f"month_comparison={summary.month_comparison_date} "
         f"bullets={len(summary.bullets)}",
         flush=True,
     )
