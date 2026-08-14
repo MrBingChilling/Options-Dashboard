@@ -154,6 +154,14 @@ def _gamma_flip(chain: pd.DataFrame, spot: float) -> float | None:
     return find_gamma_flip(curve, spot)
 
 
+def _vertical_rule(value: float, color: str, dash: list[int], width: float = 1.5) -> alt.Chart:
+    return (
+        alt.Chart(pd.DataFrame({"x": [float(value)]}))
+        .mark_rule(color=color, strokeDash=dash, strokeWidth=width)
+        .encode(x=alt.X("x:Q"))
+    )
+
+
 def gamma_exposure_chart(
     profile: pd.DataFrame,
     spot: float,
@@ -199,48 +207,22 @@ def gamma_exposure_chart(
             ],
         )
     )
-    rules = [
-        alt.Chart(pd.DataFrame({"x": [spot]}))
-        .mark_rule(color=SPOT_COLOR, strokeDash=[5, 5], strokeWidth=1.5)
-        .encode(x="x:Q")
-    ]
-    if gamma_flip is not None:
-        rules.append(
-            alt.Chart(pd.DataFrame({"x": [gamma_flip]}))
-            .mark_rule(color=FLIP_COLOR, strokeDash=[3, 4], strokeWidth=1.5)
-            .encode(x="x:Q")
-        )
 
-    labels: list[dict[str, object]] = []
-    if call_wall is not None:
-        call_value = float(data.loc[(data["strike"] - call_wall).abs().idxmin(), "call_gex_mm"])
-        labels.append({"strike": call_wall, "value": call_value, "label": f"Call Wall {call_wall:g}", "kind": "call"})
-    if put_wall is not None:
-        put_value = float(data.loc[(data["strike"] - put_wall).abs().idxmin(), "put_gex_mm"])
-        labels.append({"strike": put_wall, "value": put_value, "label": f"Put Wall {put_wall:g}", "kind": "put"})
-    label_layer: alt.Chart | None = None
-    if labels:
-        label_frame = pd.DataFrame(labels)
-        label_layer = (
-            alt.Chart(label_frame)
-            .mark_text(dy=-12, fontSize=12, fontWeight="bold")
-            .encode(
-                x="strike:Q",
-                y="value:Q",
-                text="label:N",
-                color=alt.Color(
-                    "kind:N",
-                    scale=alt.Scale(domain=["call", "put"], range=[CALL_COLOR, PUT_COLOR]),
-                    legend=None,
-                ),
-            )
-        )
+    min_strike = float(data["strike"].min())
+    max_strike = float(data["strike"].max())
+    rules: list[alt.Chart] = []
+    if min_strike <= spot <= max_strike:
+        rules.append(_vertical_rule(spot, SPOT_COLOR, [5, 5]))
+    if gamma_flip is not None and min_strike <= gamma_flip <= max_strike:
+        rules.append(_vertical_rule(gamma_flip, FLIP_COLOR, [3, 4]))
+    if call_wall is not None and min_strike <= call_wall <= max_strike:
+        rules.append(_vertical_rule(call_wall, CALL_COLOR, [2, 3], 1.8))
+    if put_wall is not None and min_strike <= put_wall <= max_strike:
+        rules.append(_vertical_rule(put_wall, PUT_COLOR, [2, 3], 1.8))
 
-    chart = alt.layer(bar_layer, aggregate, *rules)
-    if label_layer is not None:
-        chart = alt.layer(chart, label_layer)
     return (
-        chart.resolve_scale(y="independent")
+        alt.layer(bar_layer, aggregate, *rules)
+        .resolve_scale(y="independent")
         .properties(height=430, title="Gamma Exposure")
         .configure_view(strokeOpacity=0)
         .configure_axis(gridColor="#293144", domainColor="#4A556C", tickColor="#4A556C")
@@ -385,5 +367,5 @@ def render_archived_gamma_dashboard(store: SnapshotStore) -> None:
     st.altair_chart(volume_by_strike_chart(visible), use_container_width=True)
     st.caption(
         "Blue Aggregate GEX is the cumulative net call-minus-put gamma exposure across the displayed strikes. "
-        "The dashed gray line is the saved underlying spot; the orange dashed line is the modelled gamma flip when it falls on the strike axis."
+        "Vertical lines: gray = saved spot, orange = gamma flip, red = call wall, green = put wall."
     )
