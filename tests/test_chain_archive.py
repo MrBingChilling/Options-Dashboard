@@ -42,7 +42,7 @@ def test_prepare_chain_for_archive_preserves_quotes_and_local_surface_fields():
                 "volume": 18,
                 "iv": 0.31,
                 "delta": -0.48,
-                "gamma": 0.05,
+                "gamma": None,
                 "theta": -0.08,
                 "vega": 0.11,
             },
@@ -58,5 +58,8 @@ def test_prepare_chain_for_archive_preserves_quotes_and_local_surface_fields():
     assert archived["openInterest"].tolist() == [120, 140]
     assert archived["iv_used"].notna().all()
     assert archived["delta_used"].notna().all()
+    assert archived["gamma_used"].notna().all()
+    assert (archived["gamma_used"] > 0).all()
     assert set(archived["iv_source"]) == {"vendor"}
     assert set(archived["delta_source"]) == {"vendor"}
+    assert set(archived["gamma_source"]) == {"black_scholes_from_iv"}
