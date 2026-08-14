@@ -18,6 +18,7 @@ CALL_COLOR = "#F43F5E"
 PUT_COLOR = "#10B981"
 AGG_COLOR = "#6384FF"
 CONTRACT_MULTIPLIER = 100.0
+ALL_EXPIRATIONS = "__all_saved_expirations__"
 
 
 def latest_archive_rows(store: SnapshotStore) -> pd.DataFrame:
@@ -65,7 +66,7 @@ def download_archived_chain(store: SnapshotStore, archive_path: str) -> pd.DataF
         if response.status_code == 200:
             try:
                 frame = pd.read_parquet(BytesIO(response.content))
-            except Exception as exc:  # pragma: no cover - defensive decode error
+            except Exception as exc:  # pragma: no cover
                 raise SnapshotStoreError(f"Archived chain could not be decoded: {exc}") from exc
             if "expiration" in frame.columns:
                 frame["expiration"] = pd.to_datetime(frame["expiration"], errors="coerce")
@@ -119,7 +120,12 @@ def profile_from_archive(chain: pd.DataFrame) -> tuple[pd.DataFrame, float]:
         pieces.append(pivot)
     profile = pd.concat(pieces, axis=1).fillna(0.0).reset_index().sort_values("strike")
     for column in (
-        "call_gex", "put_gex", "call_base_gex", "put_base_gex", "call_volume", "put_volume"
+        "call_gex",
+        "put_gex",
+        "call_base_gex",
+        "put_base_gex",
+        "call_volume",
+        "put_volume",
     ):
         if column not in profile.columns:
             profile[column] = 0.0
@@ -179,22 +185,40 @@ def focused_strike_window(
     return float(low), float(high)
 
 
-def _numeric_strike_axis(profile: pd.DataFrame) -> tuple[list[str], dict[str, str]]:
+def _spaced_strike_axis(profile: pd.DataFrame) -> tuple[list[str], list[str], dict[str, str]]:
+    """Give each real strike one empty logical slot so histogram bars do not touch."""
     origin = date(2000, 1, 1)
-    times = [(origin + timedelta(days=index)).isoformat() for index in range(len(profile))]
-    labels = {
-        time: f"{float(strike):g}"
-        for time, strike in zip(times, pd.to_numeric(profile["strike"], errors="coerce"))
-    }
-    return times, labels
+    real_times: list[str] = []
+    gap_times: list[str] = []
+    labels: dict[str, str] = {}
+    strikes = pd.to_numeric(profile["strike"], errors="coerce").tolist()
+    for index, strike in enumerate(strikes):
+        real_time = (origin + timedelta(days=index * 2)).isoformat()
+        real_times.append(real_time)
+        labels[real_time] = f"{float(strike):g}"
+        if index < len(strikes) - 1:
+            gap_time = (origin + timedelta(days=index * 2 + 1)).isoformat()
+            gap_times.append(gap_time)
+            labels[gap_time] = " "
+    return real_times, gap_times, labels
 
 
-def _marker_time(profile: pd.DataFrame, times: list[str], strike: float | None) -> str | None:
+def _histogram_with_gaps(real_times: list[str], gap_times: list[str], values: pd.Series) -> list[dict[str, object]]:
+    output: list[dict[str, object]] = []
+    numeric = pd.to_numeric(values, errors="coerce").fillna(0.0).tolist()
+    for index, (time, value) in enumerate(zip(real_times, numeric)):
+        output.append({"time": time, "value": float(value)})
+        if index < len(gap_times):
+            output.append({"time": gap_times[index]})
+    return output
+
+
+def _marker_time(profile: pd.DataFrame, real_times: list[str], strike: float | None) -> str | None:
     if strike is None or not np.isfinite(strike) or profile.empty:
         return None
     strikes = pd.to_numeric(profile["strike"], errors="coerce").to_numpy(float)
     index = int(np.nanargmin(np.abs(strikes - float(strike))))
-    return times[index]
+    return real_times[index]
 
 
 def gamma_exposure_spec(
@@ -202,13 +226,13 @@ def gamma_exposure_spec(
     call_wall: float | None,
     put_wall: float | None,
 ) -> dict[str, object]:
-    """TradingView-style, touch-friendly GEX-by-strike chart specification."""
+    """TradingView-style GEX chart with visibly separated bars."""
     data = profile.reset_index(drop=True).copy()
-    times, labels = _numeric_strike_axis(data)
-    call_markers = []
-    put_markers = []
-    call_time = _marker_time(data, times, call_wall)
-    put_time = _marker_time(data, times, put_wall)
+    real_times, gap_times, labels = _spaced_strike_axis(data)
+    call_markers: list[dict[str, object]] = []
+    put_markers: list[dict[str, object]] = []
+    call_time = _marker_time(data, real_times, call_wall)
+    put_time = _marker_time(data, real_times, put_wall)
     if call_time is not None:
         call_markers.append(
             {
@@ -230,17 +254,9 @@ def gamma_exposure_spec(
             }
         )
 
-    call_data = [
-        {"time": time, "value": float(value) / 1e6}
-        for time, value in zip(times, data["call_gex"])
-    ]
-    put_data = [
-        {"time": time, "value": float(value) / 1e6}
-        for time, value in zip(times, data["put_gex"])
-    ]
     aggregate_data = [
         {"time": time, "value": float(value) / 1e6}
-        for time, value in zip(times, data["aggregate_gex"])
+        for time, value in zip(real_times, pd.to_numeric(data["aggregate_gex"], errors="coerce").fillna(0.0))
     ]
     return {
         "title": "Gamma Exposure",
@@ -253,7 +269,7 @@ def gamma_exposure_spec(
                 "name": "Call",
                 "color": CALL_COLOR,
                 "type": "histogram",
-                "data": call_data,
+                "data": _histogram_with_gaps(real_times, gap_times, data["call_gex"] / 1e6),
                 "options": {
                     "priceScaleId": "left",
                     "priceFormat": {"type": "custom", "formatter": "compact"},
@@ -266,7 +282,7 @@ def gamma_exposure_spec(
                 "name": "Put",
                 "color": PUT_COLOR,
                 "type": "histogram",
-                "data": put_data,
+                "data": _histogram_with_gaps(real_times, gap_times, data["put_gex"] / 1e6),
                 "options": {
                     "priceScaleId": "left",
                     "priceFormat": {"type": "custom", "formatter": "compact"},
@@ -293,17 +309,9 @@ def gamma_exposure_spec(
 
 
 def volume_by_strike_spec(profile: pd.DataFrame) -> dict[str, object]:
-    """Touch-friendly call-positive / put-negative volume chart."""
+    """Touch-friendly call-positive / put-negative volume chart with bar gaps."""
     data = profile.reset_index(drop=True).copy()
-    times, labels = _numeric_strike_axis(data)
-    calls = [
-        {"time": time, "value": float(value)}
-        for time, value in zip(times, data["call_volume"])
-    ]
-    puts = [
-        {"time": time, "value": -float(value)}
-        for time, value in zip(times, data["put_volume"])
-    ]
+    real_times, gap_times, labels = _spaced_strike_axis(data)
     return {
         "title": "Volume by Strike Price",
         "subtitle": "Calls above zero · puts below zero · pinch/scroll to zoom · drag to pan",
@@ -315,7 +323,7 @@ def volume_by_strike_spec(profile: pd.DataFrame) -> dict[str, object]:
                 "name": "Call",
                 "color": CALL_COLOR,
                 "type": "histogram",
-                "data": calls,
+                "data": _histogram_with_gaps(real_times, gap_times, data["call_volume"]),
                 "options": {
                     "priceScaleId": "left",
                     "priceFormat": {"type": "custom", "formatter": "compact"},
@@ -327,7 +335,7 @@ def volume_by_strike_spec(profile: pd.DataFrame) -> dict[str, object]:
                 "name": "Put",
                 "color": PUT_COLOR,
                 "type": "histogram",
-                "data": puts,
+                "data": _histogram_with_gaps(real_times, gap_times, -data["put_volume"]),
                 "options": {
                     "priceScaleId": "left",
                     "priceFormat": {"type": "custom", "formatter": "compact"},
@@ -339,10 +347,19 @@ def volume_by_strike_spec(profile: pd.DataFrame) -> dict[str, object]:
     }
 
 
+def _scope_label(scope: object, chain: pd.DataFrame) -> str:
+    if scope != ALL_EXPIRATIONS:
+        return pd.Timestamp(scope).strftime("%b %d, %Y")
+    dtes = pd.to_numeric(chain.get("dte"), errors="coerce").dropna()
+    if dtes.empty:
+        return "All saved expirations"
+    return f"All saved expirations ({int(dtes.min())}–{int(dtes.max())} DTE)"
+
+
 def render_archived_gamma_dashboard(store: SnapshotStore) -> None:
     st.caption(
         "Gamma exposure and option volume reconstructed from the latest archived daily bounded chain. "
-        "Changing ticker, expiration, strike view, zoom, or axes reads Supabase only and uses 0 MarketData credits."
+        "The default combines every expiration in that saved chain; choosing one date isolates a single expiry."
     )
     if not store.enabled:
         st.info("Configure Supabase to load archived option chains.")
@@ -388,36 +405,44 @@ def render_archived_gamma_dashboard(store: SnapshotStore) -> None:
         st.info("The archived chain has no expiration dates.")
         return
 
+    scope_options: list[object] = [ALL_EXPIRATIONS, *expirations]
     control_left, control_right = st.columns([1.4, 1.0])
-    expiration = control_left.selectbox(
+    scope = control_left.selectbox(
         "Expiration",
-        expirations,
+        scope_options,
         index=0,
-        format_func=lambda value: pd.Timestamp(value).strftime("%b %d, %Y"),
-        key=f"iv_gamma_expiration_{symbol}",
+        format_func=lambda value: _scope_label(value, chain),
+        key=f"iv_gamma_scope_v2_{symbol}",
+        help=(
+            "Default = all expirations already contained in the bounded daily archive. "
+            "Single-expiration views can concentrate gamma at the at-the-money strike and make call/put walls coincide."
+        ),
     )
-    expiry_chain = chain[chain["expiration"].dt.date == expiration].copy()
-    if expiry_chain.empty:
-        st.info("No contracts are available for that expiration.")
+    if scope == ALL_EXPIRATIONS:
+        analysis_chain = chain.copy()
+    else:
+        analysis_chain = chain[chain["expiration"].dt.date == scope].copy()
+    if analysis_chain.empty:
+        st.info("No contracts are available for that expiration selection.")
         return
+
     try:
-        profile, spot = profile_from_archive(expiry_chain)
+        profile, spot = profile_from_archive(analysis_chain)
     except ValueError as exc:
         st.error(str(exc))
         return
-
     call_wall, put_wall = _wall_levels(profile)
-    flip = _gamma_flip(expiry_chain, spot)
+    flip = _gamma_flip(analysis_chain, spot)
+
     strike_view = control_right.selectbox(
         "Strike view",
         ["Focus", "Full", "Custom"],
         index=0,
         help="Focus keeps spot and both walls in view. Use the chart itself to pinch/zoom and pan.",
     )
-
     strikes = profile["strike"].dropna().astype(float).sort_values().unique()
     if len(strikes) == 0:
-        st.info("No strikes are available for that expiration.")
+        st.info("No strikes are available for that selection.")
         return
     min_strike, max_strike = float(strikes[0]), float(strikes[-1])
     if strike_view == "Focus":
@@ -431,13 +456,14 @@ def render_archived_gamma_dashboard(store: SnapshotStore) -> None:
             step = float(np.min(positive)) if len(positive) else 1.0
         else:
             step = max(abs(min_strike) * 0.01, 0.5)
+        scope_key = "all" if scope == ALL_EXPIRATIONS else str(scope)
         low, high = st.slider(
             "Custom strike range",
             min_value=min_strike,
             max_value=max_strike,
             value=(min_strike, max_strike),
             step=step,
-            key=f"iv_gamma_strike_range_{symbol}_{expiration}",
+            key=f"iv_gamma_strike_range_{symbol}_{scope_key}",
         )
 
     visible = profile[profile["strike"].between(low, high)].copy()
@@ -452,17 +478,17 @@ def render_archived_gamma_dashboard(store: SnapshotStore) -> None:
     metrics[2].metric("Put wall", f"${put_wall:,.2f}" if put_wall is not None else "—")
     metrics[3].metric("Gamma flip", f"${flip:,.2f}" if flip is not None else "—")
     st.caption(
-        f"Saved chain {latest_date:%Y-%m-%d} · expiration {expiration:%Y-%m-%d} · "
-        f"{len(expiry_chain):,} contracts. Standard display convention: calls positive, puts negative."
+        f"Saved chain {latest_date:%Y-%m-%d} · {_scope_label(scope, chain)} · "
+        f"{len(analysis_chain):,} contracts. Calls positive, puts negative."
     )
 
     render_chart(gamma_exposure_spec(visible, call_wall, put_wall), height=455)
     st.caption(
-        "Wall labels now match the reference style: Call Wall is marked above the red bar with a downward arrow; "
-        "Put Wall is marked below the green bar with an upward arrow. Tap legend chips to hide/show a series."
+        "Call Wall is marked above its red bar; Put Wall below its green bar. "
+        "Bars now include a visible gap between strikes, matching the reference layout more closely."
     )
     render_chart(volume_by_strike_spec(visible), height=380)
     st.caption(
-        "Both charts use the same touch-friendly Lightweight Charts engine as the TradingView-style history view. "
-        "On mobile: pinch to zoom, drag horizontally to pan, and drag a price axis vertically to expand/compress that scale."
+        "Pinch/scroll to zoom, drag horizontally to pan, and drag a price axis vertically to expand/compress that scale. "
+        "All interactions read Supabase only and use 0 MarketData credits."
     )
