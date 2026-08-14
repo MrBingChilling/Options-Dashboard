@@ -175,9 +175,6 @@ create table if not exists public.daily_ai_summaries (
     generated_at timestamptz not null default now()
 );
 
-create index if not exists daily_ai_summaries_generated_idx
-    on public.daily_ai_summaries (generated_at desc);
-
 alter table public.daily_ai_summaries enable row level security;
 revoke all on table public.daily_ai_summaries from anon, authenticated;
 
