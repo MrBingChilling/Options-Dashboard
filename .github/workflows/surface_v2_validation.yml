@@ -1,4 +1,4 @@
-name: Finish surface v3 GEX history backfill
+name: Upgrade Jan-Jun 2026 to full surface v3
 
 on:
   pull_request:
@@ -11,8 +11,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: finish-surface-v2-history-backfill
-  cancel-in-progress: true
+  group: upgrade-jan-jun-2026-surface-v3
+  cancel-in-progress: false
 
 jobs:
   backfill:
@@ -31,13 +31,13 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run surface v3 storage and credit-priority tests
+      - name: Run all tests before paid requests
         run: PYTHONPATH=. pytest -q --ignore=tests/test_app_smoke.py
 
       - name: Wait for MarketData one-device cooldown
         run: sleep 330
 
-      - name: Resume remaining historical data only
+      - name: Upgrade Jan 2 through Jun 22 to full surface v3
         env:
           PYTHONUNBUFFERED: "1"
           MARKETDATA_TOKEN: ${{ secrets.MARKETDATA_TOKEN }}
@@ -47,8 +47,8 @@ jobs:
         run: |
           PYTHONPATH=. python -u scripts/backfill_surface_v3.py \
             --symbols AUTO \
-            --start 2025-08-13 \
-            --end 2026-08-12 \
-            --max-requests 9000 \
+            --start 2026-01-02 \
+            --end 2026-06-22 \
+            --max-requests 5523 \
             --credit-reserve 100 \
             --probe-symbol SPY
