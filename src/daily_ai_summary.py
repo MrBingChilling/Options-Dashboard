@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
-from math import floor
+from datetime import date, datetime, timedelta, timezone
+from math import ceil, floor
 from typing import Any, Iterable
 
 import pandas as pd
@@ -26,7 +26,7 @@ from src.storage import SnapshotStore, SnapshotStoreError
 
 
 SUMMARY_TABLE = "daily_ai_summaries"
-GENERATOR_VERSION = "daily_ai_summary_v1"
+GENERATOR_VERSION = "daily_ai_summary_v2"
 REQUIRED_TENORS = ("1W", "1M")
 REQUIRED_25D_COLUMNS = ("call_25d_iv", "put_25d_iv", "skew_25d")
 VOLATILITY_COLUMNS = (
@@ -36,6 +36,9 @@ VOLATILITY_COLUMNS = (
     "skew_25d",
 )
 TRIM_FRACTION = 0.10
+PERCENTILE_LOOKBACK_DAYS = 60
+MAX_BULLETS = 9
+MAX_SUMMARY_WORDS = 650
 
 SUMMARY_GROUPS: dict[str, list[str]] = {
     "AI Infra": AI_POOL_SYMBOLS,
@@ -72,6 +75,8 @@ class DailySummary:
     expected_symbol_count: int
     bullets: tuple[SummaryBullet, ...]
     bottom_line: str
+    week_comparison_date: date | None = None
+    month_comparison_date: date | None = None
     generator_version: str = GENERATOR_VERSION
 
     def record(self) -> dict[str, Any]:
@@ -84,6 +89,19 @@ class DailySummary:
             "summary": {
                 "bullets": [bullet.record() for bullet in self.bullets],
                 "bottom_line": self.bottom_line,
+                "comparison_dates": {
+                    "1D": self.comparison_date.isoformat(),
+                    **(
+                        {"1W": self.week_comparison_date.isoformat()}
+                        if self.week_comparison_date
+                        else {}
+                    ),
+                    **(
+                        {"1M": self.month_comparison_date.isoformat()}
+                        if self.month_comparison_date
+                        else {}
+                    ),
+                },
                 "data_note": (
                     "Generated only from saved spot and volatility-surface data. "
                     "It does not use news, event calendars or observed option order flow."
@@ -102,6 +120,12 @@ class DailySummary:
             for item in payload.get("bullets", [])
             if isinstance(item, dict)
         )
+        comparison_dates = payload.get("comparison_dates") or {}
+
+        def optional_date(key: str) -> date | None:
+            value = comparison_dates.get(key)
+            return date.fromisoformat(str(value)[:10]) if value else None
+
         return cls(
             snapshot_date=date.fromisoformat(str(record["snapshot_date"])[:10]),
             comparison_date=date.fromisoformat(str(record["comparison_date"])[:10]),
@@ -109,6 +133,8 @@ class DailySummary:
             expected_symbol_count=int(record.get("expected_symbol_count") or 0),
             bullets=bullets,
             bottom_line=str(payload.get("bottom_line", "")),
+            week_comparison_date=optional_date("1W"),
+            month_comparison_date=optional_date("1M"),
             generator_version=str(record.get("generator_version") or GENERATOR_VERSION),
         )
 
@@ -318,237 +344,297 @@ def _toward(value: float) -> str:
     return "calls" if value >= 0 else "puts"
 
 
-def _index_bullet(paired: pd.DataFrame) -> SummaryBullet:
-    spy = _single_snapshot(paired, "SPY", "1W")
-    qqq = _single_snapshot(paired, "QQQ", "1W")
-    mean_skew_delta = (spy["skew_25d_delta"] + qqq["skew_25d_delta"]) / 2.0
-    both_up = spy["spot_pct"] > 0 and qqq["spot_pct"] > 0
-    if both_up and mean_skew_delta <= -0.50:
-        title = "Indexes rose, but short-term downside protection became relatively richer."
-    elif mean_skew_delta >= 0.50:
-        title = "Short-term index skew shifted toward calls."
-    elif mean_skew_delta <= -0.50:
-        title = "Short-term index skew shifted toward puts."
-    else:
-        title = "Short-term index skew was broadly stable."
-    body = (
-        f"SPY {_rose_or_fell(spy['spot_pct'])}% while its 1W 25Δ skew moved "
-        f"{_signed(spy['skew_25d_delta'])} vol points to {_signed(spy['skew_25d'])}; "
-        f"QQQ {_rose_or_fell(qqq['spot_pct'])}% while skew moved "
-        f"{_signed(qqq['skew_25d_delta'])} to {_signed(qqq['skew_25d'])}."
-    )
-    if (
-        spy["put_25d_iv_delta"] > 0 > spy["call_25d_iv_delta"]
-        and qqq["put_25d_iv_delta"] > 0 > qqq["call_25d_iv_delta"]
-    ):
-        body += " Put IV rose slightly while call IV declined in both indexes."
-    return SummaryBullet(title, body)
+def _nearest_session(sessions: Iterable[date], target: date) -> date:
+    choices = list(sessions)
+    if not choices:
+        raise SummaryNotReady("No prior complete session is available for comparison.")
+    return min(choices, key=lambda stamp: (abs((stamp - target).days), -stamp.toordinal()))
 
 
-def _broad_bullet(paired: pd.DataFrame) -> SummaryBullet | None:
-    atm = _metric_stats(
-        paired, SUMMARY_GROUPS["Dashboard ex-index"], "1W", "atm_iv"
-    )
-    skew = _metric_stats(
-        paired, SUMMARY_GROUPS["Dashboard ex-index"], "1W", "skew_25d"
-    )
-    if atm is None or skew is None:
-        return None
-    if atm.delta_trimmed <= -1.0:
-        title = "Volatility cooled across the broader dashboard."
-    elif atm.delta_trimmed >= 1.0:
-        title = "Volatility expanded across the broader dashboard."
-    else:
-        title = "Broad dashboard volatility was relatively stable."
-    body = (
-        f"Dashboard ex-index 1W ATM IV {_rose_or_fell(atm.delta_trimmed)} vol points "
-        f"to {atm.current_trimmed:.2f} using the 10% trimmed mean, and "
-        f"{_rose_or_fell(atm.delta_equal)} to {atm.current_equal:.2f} using the "
-        f"equal-weight mean. 1W skew moved {_signed(skew.delta_trimmed)} to "
-        f"{_signed(skew.current_trimmed)} trimmed and {_signed(skew.delta_equal)} to "
-        f"{_signed(skew.current_equal)} equal-weight."
-    )
-    return SummaryBullet(title, body)
+def _percentile(values: Iterable[float], current: float) -> float:
+    clean = [float(value) for value in values if pd.notna(value)]
+    if len(clean) <= 1:
+        return 50.0
+    below = sum(value < current for value in clean)
+    equal = sum(abs(value - current) < 1e-10 for value in clean)
+    rank = below + max(equal - 1, 0) / 2.0
+    return 100.0 * rank / (len(clean) - 1)
 
 
-def _ai_infra_bullet(paired: pd.DataFrame) -> SummaryBullet | None:
-    atm = _metric_stats(paired, AI_POOL_SYMBOLS, "1W", "atm_iv")
-    skew = _metric_stats(paired, AI_POOL_SYMBOLS, "1W", "skew_25d")
-    if atm is None or skew is None or abs(atm.delta_trimmed) < 1.5:
-        return None
-    if atm.delta_trimmed < 0:
-        title = "AI infrastructure experienced strong short-term IV compression."
-    else:
-        title = "AI infrastructure experienced strong short-term IV expansion."
-    body = (
-        f"The basket's 1W ATM IV {_rose_or_fell(atm.delta_trimmed)} vol points "
-        f"to {atm.current_trimmed:.2f} trimmed and {_rose_or_fell(atm.delta_equal)} "
-        f"to {atm.current_equal:.2f} equal-weight. Its 1W skew moved only "
-        f"{_signed(skew.delta_trimmed)} to {_signed(skew.current_trimmed)} trimmed, "
-        "which points more to broad volatility repricing than a uniform directional shift."
-    )
-    return SummaryBullet(title, body)
+def _percentile_text(value: float) -> str:
+    rounded = int(round(value))
+    suffix = "th" if 10 <= rounded % 100 <= 20 else {1: "st", 2: "nd", 3: "rd"}.get(rounded % 10, "th")
+    return f"{rounded}{suffix} percentile"
 
 
-def _material_basket_bullets(paired: pd.DataFrame) -> tuple[list[SummaryBullet], list[str]]:
-    candidates: list[tuple[float, str, MetricStats, dict[str, float]]] = []
-    for name in (
-        "Neoclouds",
-        "Mag 7",
-        "Software",
-        "Power",
-        "AI Photonics",
-        "AI Fabless Semis",
-        "AI Memory",
-        "AI Fabs",
-    ):
-        stats = _metric_stats(paired, SUMMARY_GROUPS[name], "1M", "skew_25d")
-        if stats is None or abs(stats.delta_equal) < 1.50:
+def _group_percentile(
+    history: pd.DataFrame,
+    current_date: date,
+    members: Iterable[str],
+    tenor: str,
+    metric: str,
+    *,
+    trimmed: bool = False,
+) -> tuple[float, int]:
+    wanted = {str(symbol).upper() for symbol in members}
+    start = current_date - timedelta(days=PERCENTILE_LOOKBACK_DAYS)
+    work = history[
+        (history["snapshot_date"].dt.date >= start)
+        & (history["snapshot_date"].dt.date <= current_date)
+        & history["symbol"].isin(wanted)
+        & (history["tenor"] == tenor)
+    ]
+    minimum = max(1, min(len(wanted), max(3, ceil(len(wanted) * 0.60))))
+    observations: list[tuple[date, float]] = []
+    for stamp, dated in work.groupby("snapshot_date", sort=True):
+        values = pd.to_numeric(dated[metric], errors="coerce").dropna() * 100.0
+        if len(values) < minimum:
             continue
-        changes = _member_skew_changes(paired, SUMMARY_GROUPS[name], "1M")
-        candidates.append((abs(stats.delta_equal), name, stats, changes))
+        aggregate = _trimmed_mean(values) if trimmed else float(values.mean())
+        observations.append((pd.Timestamp(stamp).date(), aggregate))
+    current_values = [value for stamp, value in observations if stamp == current_date]
+    if not current_values:
+        return 50.0, len(observations)
+    return _percentile((value for _, value in observations), current_values[-1]), len(observations)
+
+
+def _single_percentile(
+    history: pd.DataFrame,
+    current_date: date,
+    symbol: str,
+    tenor: str,
+    metric: str,
+) -> tuple[float, int]:
+    start = current_date - timedelta(days=PERCENTILE_LOOKBACK_DAYS)
+    work = history[
+        (history["snapshot_date"].dt.date >= start)
+        & (history["snapshot_date"].dt.date <= current_date)
+        & (history["symbol"] == symbol.upper())
+        & (history["tenor"] == tenor)
+    ].dropna(subset=[metric])
+    observations = pd.to_numeric(work[metric], errors="coerce").dropna() * 100.0
+    current = work[work["snapshot_date"].dt.date == current_date]
+    if current.empty or observations.empty:
+        return 50.0, len(observations)
+    current_value = float(pd.to_numeric(current[metric], errors="coerce").iloc[-1]) * 100.0
+    return _percentile(observations, current_value), len(observations)
+
+
+def _group_spot_change(paired: pd.DataFrame, members: Iterable[str]) -> float:
+    wanted = {str(symbol).upper() for symbol in members}
+    work = paired.reset_index()
+    work = work[(work["symbol"].isin(wanted)) & (work["tenor"] == "1W")].copy()
+    work = work.dropna(subset=["spot_current", "spot_prior"])
+    work = work[work["spot_prior"] != 0]
+    if work.empty:
+        return float("nan")
+    return float(((work["spot_current"] / work["spot_prior"] - 1.0) * 100.0).mean())
+
+
+def _multi_horizon_broad_bullet(pairs: dict[str, pd.DataFrame]) -> SummaryBullet | None:
+    dashboard = {
+        horizon: _metric_stats(pair, SUMMARY_GROUPS["Dashboard ex-index"], "1W", "atm_iv")
+        for horizon, pair in pairs.items()
+    }
+    ai_infra = {
+        horizon: _metric_stats(pair, AI_POOL_SYMBOLS, "1W", "atm_iv")
+        for horizon, pair in pairs.items()
+    }
+    if any(value is None for value in (*dashboard.values(), *ai_infra.values())):
+        return None
+    d1, w1, m1 = dashboard["1D"], dashboard["1W"], dashboard["1M"]
+    ai_d1, ai_w1, ai_m1 = ai_infra["1D"], ai_infra["1W"], ai_infra["1M"]
+    assert d1 and w1 and m1 and ai_d1 and ai_w1 and ai_m1
+    if max(abs(d1.delta_trimmed), abs(w1.delta_trimmed), abs(m1.delta_trimmed)) < 1.0:
+        return None
+    if m1.delta_trimmed <= -5.0 and ai_m1.delta_trimmed <= -5.0:
+        title = "Volatility compression is a multi-week regime, not just a one-day move."
+    elif m1.delta_trimmed >= 5.0 and ai_m1.delta_trimmed >= 5.0:
+        title = "Volatility expansion is a multi-week regime, not just a one-day move."
+    else:
+        title = "The broad volatility regime changed materially across multiple horizons."
+    return SummaryBullet(
+        title,
+        f"Dashboard ex-index 1W ATM IV is {d1.current_trimmed:.2f} on a 10% trimmed basis, "
+        f"changing {_signed(d1.delta_trimmed)} over 1D, {_signed(w1.delta_trimmed)} over 1W "
+        f"and {_signed(m1.delta_trimmed)} over 1M. AI Infra is {ai_d1.current_trimmed:.2f}, "
+        f"with corresponding moves of {_signed(ai_d1.delta_trimmed)}, "
+        f"{_signed(ai_w1.delta_trimmed)} and {_signed(ai_m1.delta_trimmed)} vol points.",
+    )
+
+
+def _index_context_bullet(
+    history: pd.DataFrame,
+    current_date: date,
+    pairs: dict[str, pd.DataFrame],
+) -> SummaryBullet:
+    snapshots = {
+        symbol: {horizon: _single_snapshot(pair, symbol, "1W") for horizon, pair in pairs.items()}
+        for symbol in ("SPY", "QQQ")
+    }
+    skew_percentiles = {
+        symbol: _single_percentile(history, current_date, symbol, "1W", "skew_25d")[0]
+        for symbol in snapshots
+    }
+    atm_percentiles = {
+        symbol: _single_percentile(history, current_date, symbol, "1W", "atm_iv")[0]
+        for symbol in snapshots
+    }
+    daily_mean = sum(snapshots[symbol]["1D"]["skew_25d_delta"] for symbol in snapshots) / 2.0
+    still_call_richer = sum(skew_percentiles.values()) / 2.0 >= 65.0
+    compressed_atm = sum(atm_percentiles.values()) / 2.0 <= 25.0
+    if daily_mean <= -0.50 and still_call_richer and compressed_atm:
+        title = "Today's index put bid is cautionary, but not yet broad risk-off."
+    elif daily_mean <= -0.50:
+        title = "Short-term index skew shifted materially toward puts."
+    elif daily_mean >= 0.50:
+        title = "Short-term index skew shifted materially toward calls."
+    else:
+        title = "Index skew did not register a material one-day regime change."
+    spy, qqq = snapshots["SPY"], snapshots["QQQ"]
+    return SummaryBullet(
+        title,
+        f"SPY 1W skew moved {_signed(spy['1D']['skew_25d_delta'])} today to "
+        f"{_signed(spy['1D']['skew_25d'])}, but remains {_signed(spy['1M']['skew_25d_delta'])} "
+        f"versus one month ago and at the {_percentile_text(skew_percentiles['SPY'])} of its "
+        f"recent range. QQQ shows the same pattern: {_signed(qqq['1D']['skew_25d_delta'])} "
+        f"today, {_signed(qqq['1M']['skew_25d_delta'])} over 1M, and the "
+        f"{_percentile_text(skew_percentiles['QQQ'])}; both indexes' 1W ATM IV readings sit "
+        f"near the {_percentile_text(sum(atm_percentiles.values()) / 2.0)}.",
+    )
+
+
+def _persistent_basket_bullets(
+    history: pd.DataFrame,
+    current_date: date,
+    pairs: dict[str, pd.DataFrame],
+) -> tuple[list[SummaryBullet], list[str]]:
+    candidates: list[tuple[float, str, dict[str, MetricStats], dict[str, MetricStats], float]] = []
+    for name in ("Neoclouds", "Mag 7", "Software", "Power", "AI Photonics", "AI Fabless Semis", "AI Memory", "AI Fabs"):
+        one_week = {h: _metric_stats(pair, SUMMARY_GROUPS[name], "1W", "skew_25d") for h, pair in pairs.items()}
+        one_month = {h: _metric_stats(pair, SUMMARY_GROUPS[name], "1M", "skew_25d") for h, pair in pairs.items()}
+        if any(value is None for value in (*one_week.values(), *one_month.values())):
+            continue
+        assert all(one_week.values()) and all(one_month.values())
+        pctl, _ = _group_percentile(history, current_date, SUMMARY_GROUPS[name], "1W", "skew_25d")
+        month_signal = max(abs(one_week["1M"].delta_equal), abs(one_month["1M"].delta_equal))
+        direction = 1.0 if one_week["1M"].delta_equal >= 0 else -1.0
+        extreme = (direction > 0 and pctl >= 85.0) or (direction < 0 and pctl <= 15.0)
+        same_tenor_direction = one_week["1M"].delta_equal * one_month["1M"].delta_equal > 0
+        violent_reversal = (
+            one_week["1W"].delta_equal * one_week["1M"].delta_equal < 0
+            and abs(one_week["1W"].delta_equal) > max(4.0, 2.0 * abs(one_week["1M"].delta_equal))
+        )
+        if month_signal < 3.0 or not extreme or not same_tenor_direction or violent_reversal:
+            continue
+        score = month_signal + abs(pctl - 50.0) / 10.0
+        if one_week["1W"].delta_equal * one_week["1M"].delta_equal > 0:
+            score += 2.0
+        candidates.append((score, name, one_week, one_month, pctl))
     candidates.sort(reverse=True, key=lambda item: item[0])
 
     bullets: list[SummaryBullet] = []
-    selected_names: list[str] = []
-    for _, name, stats, changes in candidates[:3]:
-        selected_names.append(name)
-        direction = _toward(stats.delta_equal)
-        same_direction = sum(
-            value >= 0 if stats.delta_equal >= 0 else value < 0
-            for value in changes.values()
-        )
-        leader, leader_change = max(changes.items(), key=lambda item: abs(item[1]))
-        leader_snapshot = _single_snapshot(paired, leader, "1M")
-        title = f"{name} 1M positioning moved sharply toward {direction}."
+    names: list[str] = []
+    for _, name, one_week, one_month, pctl in candidates[:2]:
+        names.append(name)
+        direction = _toward(one_week["1M"].delta_equal)
+        title = f"{name} shows a persistent, historically elevated shift toward {direction}."
         body = (
-            f"Equal-weight basket skew moved {_signed(stats.delta_equal)} vol points "
-            f"to {_signed(stats.current_equal)}; {same_direction}/{len(changes)} members "
-            f"moved in the same direction. {leader} was the largest contributor, with "
-            f"skew moving {_signed(leader_change)} to "
-            f"{_signed(leader_snapshot['skew_25d'])}."
+            f"Its equal-weight 1W skew changed {_signed(one_week['1W'].delta_equal)} over 1W "
+            f"and {_signed(one_week['1M'].delta_equal)} over 1M to "
+            f"{_signed(one_week['1D'].current_equal)}, now the {_percentile_text(pctl)} of the "
+            f"recent range. The 1M-tenor skew moved {_signed(one_month['1M'].delta_equal)} "
+            f"over the month to {_signed(one_month['1D'].current_equal)}."
         )
-        if stats.count >= 10 and abs(stats.delta_trimmed - stats.delta_equal) >= 0.50:
-            body += (
-                f" The 10% trimmed move was smaller at {_signed(stats.delta_trimmed)}, "
-                "showing that outliers drove part of the equal-weight change."
-            )
+        if name == "AI Memory":
+            spot_change = _group_spot_change(pairs["1W"], SUMMARY_GROUPS[name])
+            atm_change = _metric_stats(pairs["1W"], SUMMARY_GROUPS[name], "1W", "atm_iv")
+            if atm_change is not None:
+                body += (
+                    f" Spot rose {spot_change:.2f}% over 1W while 1W ATM IV moved "
+                    f"{_signed(atm_change.delta_equal)}, consistent with upside crowding rather "
+                    "than a broad volatility shock."
+                )
         bullets.append(SummaryBullet(title, body))
-    return bullets, selected_names
+    return bullets, names
 
 
-def _downside_alert(paired: pd.DataFrame, symbols: Iterable[str]) -> tuple[SummaryBullet | None, str | None]:
-    scored: list[tuple[float, str, str, dict[str, float]]] = []
+def _localized_downside_bullet(
+    history: pd.DataFrame,
+    current_date: date,
+    pairs: dict[str, pd.DataFrame],
+    symbols: Iterable[str],
+) -> tuple[SummaryBullet | None, list[str]]:
+    candidates: list[tuple[float, str, dict[str, dict[str, float]], float]] = []
     for symbol in symbols:
-        one_week = _single_snapshot(paired, symbol, "1W")
-        one_month = _single_snapshot(paired, symbol, "1M")
-        values = sorted(
-            [
-                (one_week["skew_25d_delta"], "1W", one_week),
-                (one_month["skew_25d_delta"], "1M", one_month),
-            ],
-            key=lambda item: item[0],
-        )
-        worst_delta, tenor, snapshot = values[0]
-        other_delta = values[1][0]
-        if worst_delta > -5.0:
+        snapshots = {h: _single_snapshot(pair, str(symbol), "1W") for h, pair in pairs.items()}
+        deltas = [snapshots[h]["skew_25d_delta"] for h in ("1D", "1W", "1M")]
+        pctl, _ = _single_percentile(history, current_date, str(symbol), "1W", "skew_25d")
+        severity = max(-value for value in deltas)
+        confirmed = sum(value <= -1.0 for value in deltas) >= 2
+        if snapshots["1D"]["skew_25d"] > -2.5 or severity < 5.0 or not confirmed:
             continue
-        score = abs(worst_delta) + 0.5 * max(-other_delta, 0.0) + 0.15 * max(-snapshot["skew_25d"], 0.0)
-        scored.append((score, str(symbol).upper(), tenor, snapshot))
-    if not scored:
+        atm_pctl, _ = _single_percentile(history, current_date, str(symbol), "1W", "atm_iv")
+        score = severity + max(20.0 - pctl, 0.0) / 5.0 + max(atm_pctl - 80.0, 0.0) / 10.0
+        candidates.append((score, str(symbol).upper(), snapshots, atm_pctl))
+    candidates.sort(reverse=True, key=lambda item: item[0])
+    selected = candidates[:2]
+    if not selected:
+        return None, []
+    names = [item[1] for item in selected]
+    descriptions: list[str] = []
+    for _, symbol, snapshots, atm_pctl in selected:
+        descriptions.append(
+            f"{symbol} 1W skew is {_signed(snapshots['1D']['skew_25d'])}, changing "
+            f"{_signed(snapshots['1D']['skew_25d_delta'])} over 1D, "
+            f"{_signed(snapshots['1W']['skew_25d_delta'])} over 1W and "
+            f"{_signed(snapshots['1M']['skew_25d_delta'])} over 1M; its 1W ATM IV is "
+            f"{snapshots['1D']['atm_iv']:.2f} at the {_percentile_text(atm_pctl)}"
+        )
+    return SummaryBullet(
+        f"{' and '.join(names)} show the clearest sustained ticker-level downside signals.",
+        ". ".join(descriptions) + ". These are localized exceptions, not evidence of basket-wide risk-off.",
+    ), names
+
+
+def _mag7_exception_bullet(
+    history: pd.DataFrame,
+    current_date: date,
+    pairs: dict[str, pd.DataFrame],
+) -> tuple[SummaryBullet | None, str | None]:
+    basket = _metric_stats(pairs["1M"], MAG7_SYMBOLS, "1M", "skew_25d")
+    if basket is None or abs(basket.delta_equal) > 1.0:
         return None, None
-    _, symbol, tenor, snapshot = max(scored, key=lambda item: item[0])
-    title = f"{symbol} produced the clearest downside-skew alert."
-    body = (
-        f"Its {tenor} skew {_rose_or_fell(snapshot['skew_25d_delta'])} vol points to "
-        f"{_signed(snapshot['skew_25d'])}. Put IV moved "
-        f"{_signed(snapshot['put_25d_iv_delta'])} points versus "
-        f"{_signed(snapshot['call_25d_iv_delta'])} for call IV, making downside "
-        "options substantially richer relative to calls."
-    )
-    return SummaryBullet(title, body), symbol
-
-
-def _fragmentation_bullet(paired: pd.DataFrame) -> SummaryBullet | None:
-    candidates: list[tuple[float, str, MetricStats, dict[str, float]]] = []
-    for name in ("Neoclouds", "Mag 7", "Software", "Power", "AI Photonics"):
-        changes = _member_skew_changes(paired, SUMMARY_GROUPS[name], "1W")
-        stats = _metric_stats(paired, SUMMARY_GROUPS[name], "1W", "skew_25d")
-        if not changes or stats is None:
-            continue
-        dispersion = max(changes.values()) - min(changes.values())
-        if dispersion >= 10.0 and abs(stats.delta_equal) <= 2.0:
-            candidates.append((dispersion, name, stats, changes))
+    candidates: list[tuple[float, str, dict[str, dict[str, float]], float]] = []
+    for symbol in MAG7_SYMBOLS:
+        snapshots = {h: _single_snapshot(pair, symbol, "1M") for h, pair in pairs.items()}
+        pctl, _ = _single_percentile(history, current_date, symbol, "1M", "skew_25d")
+        if snapshots["1M"]["skew_25d_delta"] <= -3.0 and snapshots["1D"]["skew_25d"] < 0 and pctl <= 15.0:
+            candidates.append((-snapshots["1M"]["skew_25d_delta"] + (15.0 - pctl) / 5.0, symbol, snapshots, pctl))
     if not candidates:
-        return None
-    _, name, stats, changes = max(candidates, key=lambda item: item[0])
-    strongest = max(changes.items(), key=lambda item: item[1])
-    weakest = min(changes.items(), key=lambda item: item[1])
+        return None, None
+    _, symbol, snapshots, pctl = max(candidates, key=lambda item: item[0])
     return SummaryBullet(
-        f"{name} positioning was highly fragmented.",
-        f"{strongest[0]} shifted {_signed(strongest[1])} vol points toward calls, "
-        f"while {weakest[0]} shifted {_signed(weakest[1])} toward puts. The basket's "
-        f"equal-weight 1W skew moved only {_signed(stats.delta_equal)}, so its average "
-        "hides substantial disagreement between members.",
-    )
+        f"A calm Mag 7 basket masks a {symbol}-specific downside-skew regime.",
+        f"Mag 7 equal-weight 1M skew changed only {_signed(basket.delta_equal)} over the month, "
+        f"but {symbol} 1M skew changed {_signed(snapshots['1M']['skew_25d_delta'])} to "
+        f"{_signed(snapshots['1D']['skew_25d'])}, the {_percentile_text(pctl)} of its recent "
+        f"range. Its daily and weekly changes were {_signed(snapshots['1D']['skew_25d_delta'])} "
+        f"and {_signed(snapshots['1W']['skew_25d_delta'])}, respectively.",
+    ), symbol
 
 
-def _stable_bullet(paired: pd.DataFrame) -> SummaryBullet | None:
-    stable: list[tuple[float, str, MetricStats, MetricStats, MetricStats, MetricStats]] = []
-    for name in ("Mag 7", "Neoclouds", "Software", "Power", "AI Photonics"):
-        skew_1w = _metric_stats(paired, SUMMARY_GROUPS[name], "1W", "skew_25d")
-        skew_1m = _metric_stats(paired, SUMMARY_GROUPS[name], "1M", "skew_25d")
-        atm_1w = _metric_stats(paired, SUMMARY_GROUPS[name], "1W", "atm_iv")
-        atm_1m = _metric_stats(paired, SUMMARY_GROUPS[name], "1M", "atm_iv")
-        if None in (skew_1w, skew_1m, atm_1w, atm_1m):
-            continue
-        assert skew_1w and skew_1m and atm_1w and atm_1m
-        score = (
-            abs(skew_1w.delta_equal)
-            + abs(skew_1m.delta_equal)
-            + 0.25 * abs(atm_1w.delta_equal)
-            + 0.25 * abs(atm_1m.delta_equal)
-        )
-        if (
-            abs(skew_1w.delta_equal) <= 0.50
-            and abs(skew_1m.delta_equal) <= 0.50
-            and abs(atm_1w.delta_equal) <= 1.50
-            and abs(atm_1m.delta_equal) <= 1.50
-        ):
-            stable.append((score, name, skew_1w, skew_1m, atm_1w, atm_1m))
-    if not stable:
-        return None
-    _, name, skew_1w, skew_1m, atm_1w, _ = min(stable, key=lambda item: item[0])
+def _no_regime_change_bullet(pairs: dict[str, pd.DataFrame]) -> SummaryBullet:
+    atm = {h: _metric_stats(pair, SUMMARY_GROUPS["Dashboard ex-index"], "1W", "atm_iv") for h, pair in pairs.items()}
+    skew = {h: _metric_stats(pair, SUMMARY_GROUPS["Dashboard ex-index"], "1W", "skew_25d") for h, pair in pairs.items()}
+    assert all(atm.values()) and all(skew.values())
     return SummaryBullet(
-        f"{name} was comparatively quiet.",
-        f"Its 1W skew moved only {_signed(skew_1w.delta_equal)} to "
-        f"{_signed(skew_1w.current_equal)}, 1M skew moved "
-        f"{_signed(skew_1m.delta_equal)} to {_signed(skew_1m.current_equal)}, and "
-        f"1W ATM IV moved {_signed(atm_1w.delta_equal)} vol points. There was no "
-        "broad positioning change comparable with the day's more active baskets.",
-    )
-
-
-def _volatility_reset_bullet(paired: pd.DataFrame, symbols: Iterable[str]) -> SummaryBullet | None:
-    resets: list[tuple[float, str, dict[str, float]]] = []
-    for symbol in symbols:
-        snapshot = _single_snapshot(paired, symbol, "1W")
-        if abs(snapshot["spot_pct"]) >= 5.0 and snapshot["atm_iv_delta"] <= -10.0:
-            resets.append((snapshot["atm_iv_delta"], str(symbol).upper(), snapshot))
-    if not resets:
-        return None
-    resets.sort(key=lambda item: item[0])
-    descriptions = [
-        f"{symbol} ({snapshot['spot_pct']:+.2f}% spot; "
-        f"{snapshot['atm_iv_delta']:+.2f} 1W ATM-IV points)"
-        for _, symbol, snapshot in resets[:3]
-    ]
-    return SummaryBullet(
-        "Unusual volatility resets deserve an individual review.",
-        "; ".join(descriptions)
-        + ". These look like event-type volatility resets or other sharp surface "
-        "repricing, but the dashboard does not include a news or event calendar, so "
-        "they should not be interpreted automatically as bullish signals.",
+        "No additional broad regime change cleared the materiality threshold.",
+        f"Dashboard ex-index 1W ATM IV changed {_signed(atm['1D'].delta_trimmed)}, "
+        f"{_signed(atm['1W'].delta_trimmed)} and {_signed(atm['1M'].delta_trimmed)} over "
+        f"1D/1W/1M; trimmed skew changed {_signed(skew['1D'].delta_trimmed)}, "
+        f"{_signed(skew['1W'].delta_trimmed)} and {_signed(skew['1M'].delta_trimmed)}. "
+        "The remaining basket moves were either small, short-lived or too concentrated in outliers.",
     )
 
 
@@ -563,58 +649,54 @@ def build_daily_summary(
         raise SummaryNotReady(
             "Two complete sessions with 1W + 1M 25D rows for every configured ticker are required."
         )
-    comparison_date, current_date = sessions[-2], sessions[-1]
-    paired = _paired_sessions(work, current_date, comparison_date)
+    current_date = sessions[-1]
+    comparison_date = sessions[-2]
+    week_comparison_date = _nearest_session(sessions[:-1], current_date - timedelta(days=7))
+    month_comparison_date = _nearest_session(sessions[:-1], current_date - timedelta(days=30))
+    pairs = {
+        "1D": _paired_sessions(work, current_date, comparison_date),
+        "1W": _paired_sessions(work, current_date, week_comparison_date),
+        "1M": _paired_sessions(work, current_date, month_comparison_date),
+    }
 
-    bullets: list[SummaryBullet] = [_index_bullet(paired)]
-    for optional in (_broad_bullet(paired), _ai_infra_bullet(paired)):
-        if optional is not None:
-            bullets.append(optional)
-
-    basket_bullets, active_baskets = _material_basket_bullets(paired)
+    bullets: list[SummaryBullet] = []
+    broad = _multi_horizon_broad_bullet(pairs)
+    if broad is not None:
+        bullets.append(broad)
+    bullets.append(_index_context_bullet(work, current_date, pairs))
+    basket_bullets, active_baskets = _persistent_basket_bullets(work, current_date, pairs)
     bullets.extend(basket_bullets)
-
-    downside, downside_symbol = _downside_alert(paired, expected)
+    downside, downside_symbols = _localized_downside_bullet(work, current_date, pairs, expected)
     if downside is not None:
         bullets.append(downside)
-    fragmentation = _fragmentation_bullet(paired)
-    if fragmentation is not None:
-        bullets.append(fragmentation)
-    stable = _stable_bullet(paired)
-    if stable is not None:
-        bullets.append(stable)
-    reset = _volatility_reset_bullet(paired, expected)
-    if reset is not None:
-        bullets.append(reset)
+    mag7, mag7_symbol = _mag7_exception_bullet(work, current_date, pairs)
+    if mag7 is not None:
+        bullets.append(mag7)
+    if len(bullets) == 1:
+        bullets.append(_no_regime_change_bullet(pairs))
+    bullets = bullets[:MAX_BULLETS]
 
-    dashboard_atm = _metric_stats(
-        paired, SUMMARY_GROUPS["Dashboard ex-index"], "1W", "atm_iv"
-    )
-    spy = _single_snapshot(paired, "SPY", "1W")
-    qqq = _single_snapshot(paired, "QQQ", "1W")
+    dashboard_month = _metric_stats(pairs["1M"], SUMMARY_GROUPS["Dashboard ex-index"], "1W", "atm_iv")
+    index_daily = sum(_single_snapshot(pairs["1D"], symbol, "1W")["skew_25d_delta"] for symbol in ("SPY", "QQQ")) / 2.0
     conclusions: list[str] = []
-    if dashboard_atm is not None:
-        conclusions.append(
-            "Broad volatility cooled"
-            if dashboard_atm.delta_trimmed < -1.0
-            else "Broad volatility expanded"
-            if dashboard_atm.delta_trimmed > 1.0
-            else "Broad volatility was stable"
-        )
-    if (spy["skew_25d_delta"] + qqq["skew_25d_delta"]) / 2.0 < -0.50:
-        conclusions.append("index downside options became richer relative to calls")
-    elif (spy["skew_25d_delta"] + qqq["skew_25d_delta"]) / 2.0 > 0.50:
-        conclusions.append("index skew moved toward calls")
-    if active_baskets:
-        conclusions.append(
-            "the largest basket changes were concentrated in "
-            + ", ".join(active_baskets[:-1])
-            + (f" and {active_baskets[-1]}" if len(active_baskets) > 1 else active_baskets[0])
-        )
-    if downside_symbol:
-        conclusions.append(f"{downside_symbol} was the clearest downside-skew alert")
+    if dashboard_month is not None:
+        if dashboard_month.delta_trimmed <= -5.0:
+            conclusions.append("the dominant regime is multi-week IV compression, not broad fear")
+        elif dashboard_month.delta_trimmed >= 5.0:
+            conclusions.append("the dominant regime is multi-week IV expansion")
+        else:
+            conclusions.append("broad IV has not made a decisive monthly regime shift")
+    if index_daily <= -0.50:
+        conclusions.append("today's index put demand is an early caution signal")
+    elif index_daily >= 0.50:
+        conclusions.append("today's index skew leaned toward calls")
+    exceptions = active_baskets + downside_symbols + ([mag7_symbol] if mag7_symbol else [])
+    if exceptions:
+        conclusions.append("the material exceptions are " + ", ".join(exceptions))
     bottom_line = "; ".join(conclusions).rstrip(".") + "."
     bottom_line = bottom_line[:1].upper() + bottom_line[1:]
+    while len(" ".join([*(f"{bullet.title} {bullet.body}" for bullet in bullets), bottom_line]).split()) > MAX_SUMMARY_WORDS and len(bullets) > 2:
+        bullets.pop()
 
     return DailySummary(
         snapshot_date=current_date,
@@ -623,4 +705,6 @@ def build_daily_summary(
         expected_symbol_count=len(expected),
         bullets=tuple(bullets),
         bottom_line=bottom_line,
+        week_comparison_date=week_comparison_date,
+        month_comparison_date=month_comparison_date,
     )
