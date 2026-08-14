@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import os
+from dataclasses import replace
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
 import pandas as pd
 
+from src.chain_archive import CALCULATION_VERSION, archive_chain
+from src.collection_storage import save_collection_run_best_effort, usage_since
 from src.marketdata_client import MarketDataClient, MarketDataError
 from src.skew_collector import AUTO_SYMBOLS, DAILY_TENORS, previous_weekday, skew_snapshots_from_chain
 from src.storage import SnapshotStore, SnapshotStoreError
@@ -73,29 +76,95 @@ def _fetch_and_save(
         flush=True,
     )
 
-    result = client.fetch_skew_chain(symbol, requested_date)
+    usage_start = len(client.usage_events)
+    result = None
+    archive = None
+    saved_rows = 0
+    try:
+        result = client.fetch_skew_chain(symbol, requested_date)
 
-    vendor_iv = pd.to_numeric(result.data.get("iv"), errors="coerce")
-    usable_vendor_iv = int((vendor_iv.notna() & (vendor_iv > 0)).sum())
-    print(
-        f"[chain] {symbol} rows={len(result.data)} "
-        f"vendor_iv_usable={usable_vendor_iv}/{len(result.data)}",
-        flush=True,
-    )
+        vendor_iv = pd.to_numeric(result.data.get("iv"), errors="coerce")
+        usable_vendor_iv = int((vendor_iv.notna() & (vendor_iv > 0)).sum())
+        print(
+            f"[chain] {symbol} rows={len(result.data)} "
+            f"vendor_iv_usable={usable_vendor_iv}/{len(result.data)}",
+            flush=True,
+        )
 
-    snapshots = skew_snapshots_from_chain(
-        symbol,
-        result.snapshot_date,
-        result.data,
-    )
-    save_volatility_snapshots(store, snapshots)
+        # Preserve the entire already-paid-for bounded chain before reducing it
+        # to dashboard summaries. Reruns upsert the same immutable date/version path.
+        archive = archive_chain(store, symbol, result.snapshot_date, result.data)
+        snapshots = skew_snapshots_from_chain(
+            symbol,
+            result.snapshot_date,
+            result.data,
+        )
+        snapshots = [
+            replace(
+                snapshot,
+                archive_path=archive.path,
+                chain_contract_count=archive.contract_count,
+                calculation_version=CALCULATION_VERSION,
+            )
+            for snapshot in snapshots
+        ]
+        save_volatility_snapshots(store, snapshots)
+        saved_rows = len(snapshots)
 
-    print(
-        f"[saved] {symbol} actual_session={result.snapshot_date} "
-        f"rows={len(snapshots)}",
-        flush=True,
-    )
-    return result.snapshot_date
+        consumed, remaining = usage_since(client, usage_start)
+        save_collection_run_best_effort(
+            store,
+            {
+                "collector": "daily_skew",
+                "symbol": symbol.upper(),
+                "requested_date": requested_date.isoformat(),
+                "snapshot_date": result.snapshot_date.isoformat(),
+                "status": "saved",
+                "contract_count": len(result.data),
+                "archive_path": archive.path,
+                "archive_bytes": archive.byte_count,
+                "summary_rows_saved": saved_rows,
+                "api_credits_consumed": consumed,
+                "api_credits_remaining": remaining,
+                "min_dte": 0,
+                "max_dte": 45,
+                "range_filter": "otm",
+                "strike_limit": 30,
+                "calculation_version": CALCULATION_VERSION,
+            },
+        )
+
+        print(
+            f"[saved] {symbol} actual_session={result.snapshot_date} "
+            f"rows={len(snapshots)} archive={archive.path} bytes={archive.byte_count}",
+            flush=True,
+        )
+        return result.snapshot_date
+    except (MarketDataError, SnapshotStoreError, ValueError) as exc:
+        consumed, remaining = usage_since(client, usage_start)
+        save_collection_run_best_effort(
+            store,
+            {
+                "collector": "daily_skew",
+                "symbol": symbol.upper(),
+                "requested_date": requested_date.isoformat(),
+                "snapshot_date": result.snapshot_date.isoformat() if result is not None else None,
+                "status": "failed" if archive is None else "archive_saved_summary_failed",
+                "contract_count": len(result.data) if result is not None else None,
+                "archive_path": archive.path if archive is not None else None,
+                "archive_bytes": archive.byte_count if archive is not None else None,
+                "summary_rows_saved": saved_rows,
+                "api_credits_consumed": consumed,
+                "api_credits_remaining": remaining,
+                "min_dte": 0,
+                "max_dte": 45,
+                "range_filter": "otm",
+                "strike_limit": 30,
+                "calculation_version": CALCULATION_VERSION,
+                "error": str(exc)[:2000],
+            },
+        )
+        raise
 
 
 def main() -> int:

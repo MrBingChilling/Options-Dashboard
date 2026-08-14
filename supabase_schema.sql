@@ -96,10 +96,24 @@ create table if not exists public.volatility_snapshots (
     call_25d_iv double precision,
     put_25d_iv double precision,
     skew_25d double precision,
+    call_10d_iv double precision,
+    put_10d_iv double precision,
+    skew_10d double precision,
+    archive_path text,
+    chain_contract_count integer,
+    calculation_version text,
     created_at timestamptz not null default now(),
     constraint volatility_snapshots_symbol_date_tenor_unique
         unique (symbol, snapshot_date, tenor)
 );
+
+alter table public.volatility_snapshots
+    add column if not exists call_10d_iv double precision,
+    add column if not exists put_10d_iv double precision,
+    add column if not exists skew_10d double precision,
+    add column if not exists archive_path text,
+    add column if not exists chain_contract_count integer,
+    add column if not exists calculation_version text;
 
 create index if not exists volatility_snapshots_symbol_tenor_date_idx
     on public.volatility_snapshots (symbol, tenor, snapshot_date desc);
@@ -108,7 +122,46 @@ alter table public.volatility_snapshots enable row level security;
 revoke all on table public.volatility_snapshots from anon, authenticated;
 
 comment on table public.volatility_snapshots is
-    'Private constant-tenor ATM IV, 25-delta call/put IV, and call-minus-put skew history.';
+    'Private constant-tenor volatility surface summaries. New surface_v2 rows retain ATM, 10-delta and 25-delta IV metrics plus a link to the archived bounded chain; legacy rows are left untouched.';
+
+create table if not exists public.collection_runs (
+    id bigint generated always as identity primary key,
+    collector text not null,
+    github_run_id text,
+    symbol text not null,
+    requested_date date not null,
+    snapshot_date date,
+    status text not null,
+    contract_count integer,
+    archive_path text,
+    archive_bytes bigint,
+    summary_rows_saved integer not null default 0,
+    unavailable_tenors text,
+    api_credits_consumed integer,
+    api_credits_remaining integer,
+    min_dte integer not null default 0,
+    max_dte integer not null default 45,
+    range_filter text not null default 'otm',
+    strike_limit integer not null default 30,
+    calculation_version text,
+    error text,
+    created_at timestamptz not null default now()
+);
+
+create index if not exists collection_runs_requested_date_symbol_idx
+    on public.collection_runs (requested_date desc, symbol);
+create index if not exists collection_runs_collector_created_idx
+    on public.collection_runs (collector, created_at desc);
+
+alter table public.collection_runs enable row level security;
+revoke all on table public.collection_runs from anon, authenticated;
+
+comment on table public.collection_runs is
+    'Private audit log for MarketData option-chain collection, including actual credit usage and archive metadata.';
+
+insert into storage.buckets (id, name, public)
+values ('options-chain-archive', 'options-chain-archive', false)
+on conflict (id) do nothing;
 
 -- Make newly created tables and constraints visible to Supabase's REST API immediately.
 notify pgrst, 'reload schema';
