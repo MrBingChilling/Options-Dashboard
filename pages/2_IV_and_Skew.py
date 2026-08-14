@@ -9,6 +9,7 @@ import streamlit as st
 from lightweight_charts_v5 import lightweight_charts_v5_component
 
 from src import skew_metric_bar_chart
+from src.ai_summary_dashboard import render_ai_summary_dashboard
 from src.archived_gamma_dashboard import render_archived_gamma_dashboard
 from src.compare_charts import skew_metric_compare_bar_chart
 from src.config import get_setting
@@ -382,14 +383,18 @@ store = SnapshotStore(
 st.title("IV & Skew")
 view = st.segmented_control(
     "View",
-    ["IV & Skew", "Gamma & Volume"],
+    ["IV & Skew", "Gamma & Volume", "AI Summary"],
     default="IV & Skew",
     key="iv_skew_page_view",
-    help="Switch between the volatility/skew dashboard and the single-ticker gamma/volume dashboard.",
+    help="Switch between volatility/skew, single-ticker gamma/volume, and the saved daily market summary.",
 ) or "IV & Skew"
 
 if view == "Gamma & Volume":
     render_archived_gamma_dashboard(store)
+    st.stop()
+
+if view == "AI Summary":
+    render_ai_summary_dashboard(store)
     st.stop()
 
 st.caption(
@@ -635,7 +640,8 @@ with st.expander("Method & data behavior"):
 - **Tail Steepness:** average 10Δ wing IV minus average 25Δ wing IV.
 - **Historical aggregates:** both equal-weight and 10% trimmed-mean versions are available. Dates require at least **{MIN_COVERAGE:.0%}** constituent coverage and **{MIN_NAMES}** usable names.
 - **Gamma & Volume view:** loads the latest private archived bounded chain for one ticker, lets you choose one expiration and a strike range, and reconstructs gamma exposure plus volume by strike without calling MarketData.
+- **AI Summary view:** loads the newest saved daily insights plus prior report dates after the morning collector completes.
 - **Gamma display convention:** calls positive, puts negative. Aggregate GEX is cumulative net call-minus-put GEX across strikes. Gamma flip is modelled from the archived IV surface.
-- **API credits:** opening the page, switching views, changing presets, changing chart settings, comparisons, historical aggregates, gamma, volume, expiration and strike range all consume **0 MarketData credits**.
+- **API credits:** opening the page, switching views, changing presets, changing chart settings, comparisons, historical aggregates, gamma, volume, AI summaries, expiration and strike range all consume **0 MarketData credits**.
 - **Storage:** newer daily rows include ATM/10Δ/25Δ surface fields and a private compressed archived chain; older legacy rows can have newer fields blank.
 """)
