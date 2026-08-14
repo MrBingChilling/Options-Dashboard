@@ -10,6 +10,7 @@ from lightweight_charts_v5 import lightweight_charts_v5_component
 
 from src import skew_metric_bar_chart
 from src.ai_summary_dashboard import render_ai_summary_dashboard
+from src.calendar_dashboard import render_calendar_dashboard
 from src.archived_gamma_dashboard import render_archived_gamma_dashboard
 from src.compare_charts import skew_metric_compare_bar_chart
 from src.config import get_setting
@@ -387,10 +388,10 @@ store = SnapshotStore(
 st.title("IV & Skew")
 view = st.segmented_control(
     "View",
-    ["IV & Skew", "Gamma & Volume", "AI Summary"],
+    ["IV & Skew", "Gamma & Volume", "AI Summary", "Calendar"],
     default="IV & Skew",
     key="iv_skew_page_view",
-    help="Switch between volatility/skew, single-ticker gamma/volume, and the saved daily market summary.",
+    help="Switch between volatility/skew, single-ticker gamma/volume, the saved daily market summary, and upcoming market dates.",
 ) or "IV & Skew"
 
 if view == "Gamma & Volume":
@@ -399,6 +400,10 @@ if view == "Gamma & Volume":
 
 if view == "AI Summary":
     render_ai_summary_dashboard(store)
+    st.stop()
+
+if view == "Calendar":
+    render_calendar_dashboard()
     st.stop()
 
 st.caption(
