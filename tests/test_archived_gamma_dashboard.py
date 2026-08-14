@@ -2,9 +2,10 @@ import pandas as pd
 import pytest
 
 from src.archived_gamma_dashboard import (
-    gamma_exposure_chart,
+    focused_strike_window,
+    gamma_exposure_spec,
     profile_from_archive,
-    volume_by_strike_chart,
+    volume_by_strike_spec,
 )
 
 
@@ -64,7 +65,7 @@ def test_profile_aggregate_gex_is_cumulative_net_by_strike():
     assert profile["aggregate_gex"].iloc[1] == pytest.approx(profile["net_gex"].sum())
 
 
-def test_archived_gamma_charts_serialize_with_reference_lines():
+def test_gamma_spec_uses_dual_interactive_scales_and_reference_style_wall_markers():
     profile = pd.DataFrame(
         {
             "strike": [95.0, 100.0, 105.0],
@@ -76,15 +77,46 @@ def test_archived_gamma_charts_serialize_with_reference_lines():
         }
     )
 
-    gamma_spec = gamma_exposure_chart(
-        profile,
-        spot=100.0,
-        call_wall=105.0,
-        put_wall=95.0,
-        gamma_flip=101.0,
-    ).to_dict()
-    volume_spec = volume_by_strike_chart(profile).to_dict()
+    spec = gamma_exposure_spec(profile, call_wall=100.0, put_wall=95.0)
 
-    assert "layer" in gamma_spec
-    assert len(gamma_spec["layer"]) == 6
-    assert volume_spec["mark"]["type"] == "bar"
+    assert spec["leftScale"] is True
+    assert spec["rightScale"] is True
+    assert [item["type"] for item in spec["series"]] == ["histogram", "histogram", "line"]
+    assert spec["series"][0]["options"]["priceScaleId"] == "left"
+    assert spec["series"][2]["options"]["priceScaleId"] == "right"
+    call_marker = spec["series"][0]["options"]["markers"][0]
+    put_marker = spec["series"][1]["options"]["markers"][0]
+    assert call_marker["shape"] == "arrowDown"
+    assert call_marker["position"] == "aboveBar"
+    assert call_marker["text"] == "Call Wall 100"
+    assert put_marker["shape"] == "arrowUp"
+    assert put_marker["position"] == "belowBar"
+    assert put_marker["text"] == "Put Wall 95"
+
+
+def test_volume_spec_puts_are_negative_and_chart_uses_one_left_scale():
+    profile = pd.DataFrame(
+        {
+            "strike": [95.0, 100.0],
+            "call_volume": [10.0, 20.0],
+            "put_volume": [4.0, 12.0],
+        }
+    )
+
+    spec = volume_by_strike_spec(profile)
+
+    assert spec["leftScale"] is True
+    assert spec["rightScale"] is False
+    assert spec["series"][0]["data"][0]["value"] == pytest.approx(10.0)
+    assert spec["series"][1]["data"][0]["value"] == pytest.approx(-4.0)
+
+
+def test_focus_window_keeps_spot_and_walls_visible_without_using_full_tail_range():
+    profile = pd.DataFrame({"strike": [50.0, 80.0, 90.0, 100.0, 110.0, 120.0, 150.0]})
+
+    low, high = focused_strike_window(profile, spot=100.0, call_wall=110.0, put_wall=90.0)
+
+    assert low <= 90.0
+    assert high >= 110.0
+    assert low > 50.0
+    assert high < 150.0
