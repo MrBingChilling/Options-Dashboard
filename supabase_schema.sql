@@ -165,6 +165,25 @@ revoke all on table public.collection_runs from anon, authenticated;
 comment on table public.collection_runs is
     'Private audit log for MarketData option-chain collection, including actual credit usage, archive metadata, and whether a request saved a full GEX surface or the 25D-priority fallback.';
 
+create table if not exists public.daily_ai_summaries (
+    snapshot_date date primary key,
+    comparison_date date not null,
+    symbol_count integer not null,
+    expected_symbol_count integer not null,
+    generator_version text not null,
+    summary jsonb not null default '{}'::jsonb,
+    generated_at timestamptz not null default now()
+);
+
+create index if not exists daily_ai_summaries_generated_idx
+    on public.daily_ai_summaries (generated_at desc);
+
+alter table public.daily_ai_summaries enable row level security;
+revoke all on table public.daily_ai_summaries from anon, authenticated;
+
+comment on table public.daily_ai_summaries is
+    'Private, automatically generated daily market-navigation summaries derived only from completed saved volatility sessions.';
+
 insert into storage.buckets (id, name, public)
 values ('options-chain-archive', 'options-chain-archive', false)
 on conflict (id) do nothing;
