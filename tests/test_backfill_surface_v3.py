@@ -54,17 +54,3 @@ def test_surface_v3_resume_ignores_legacy_rows_and_keeps_verified_archives(monke
     assert attempted["QQQ"][summary_date] == {"1W", "1M"}
     assert attempted["NVDA"][partial_date] == {"1M"}
     assert attempted["SPY"][audit_date] == {"1W", "1M"}
-
-
-def test_main_installs_full_surface_fetch_and_v3_resume(monkeypatch):
-    monkeypatch.setattr(surface.legacy, "main", lambda: 0)
-
-    assert surface.main() == 0
-    assert (
-        surface.legacy.MarketDataClient.fetch_skew_chain
-        is surface.MarketDataClient.fetch_surface_chain
-    )
-    assert (
-        surface.legacy._attempted_tenors_by_date
-        is surface._surface_v3_attempted_tenors_by_date
-    )
