@@ -122,7 +122,7 @@ alter table public.volatility_snapshots enable row level security;
 revoke all on table public.volatility_snapshots from anon, authenticated;
 
 comment on table public.volatility_snapshots is
-    'Private constant-tenor volatility surface summaries. New surface_v2 rows retain ATM, 10-delta and 25-delta IV metrics plus a link to the archived bounded chain; legacy rows are left untouched.';
+    'Private constant-tenor volatility summaries. surface_v3_gex rows retain ATM, 10D and 25D IV metrics plus a link to an archived bounded chain with locally reconstructed IV, delta and gamma; legacy rows remain untouched.';
 
 create table if not exists public.collection_runs (
     id bigint generated always as identity primary key,
@@ -144,20 +144,26 @@ create table if not exists public.collection_runs (
     range_filter text not null default 'otm',
     strike_limit integer not null default 30,
     calculation_version text,
+    collection_tier text not null default 'legacy',
     error text,
     created_at timestamptz not null default now()
 );
+
+alter table public.collection_runs
+    add column if not exists collection_tier text not null default 'legacy';
 
 create index if not exists collection_runs_requested_date_symbol_idx
     on public.collection_runs (requested_date desc, symbol);
 create index if not exists collection_runs_collector_created_idx
     on public.collection_runs (collector, created_at desc);
+create index if not exists collection_runs_collector_date_tier_idx
+    on public.collection_runs (collector, requested_date desc, collection_tier);
 
 alter table public.collection_runs enable row level security;
 revoke all on table public.collection_runs from anon, authenticated;
 
 comment on table public.collection_runs is
-    'Private audit log for MarketData option-chain collection, including actual credit usage and archive metadata.';
+    'Private audit log for MarketData option-chain collection, including actual credit usage, archive metadata, and whether a request saved a full GEX surface or the 25D-priority fallback.';
 
 insert into storage.buckets (id, name, public)
 values ('options-chain-archive', 'options-chain-archive', false)
