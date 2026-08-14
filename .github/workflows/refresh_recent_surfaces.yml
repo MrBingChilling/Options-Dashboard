@@ -1,0 +1,47 @@
+name: Refresh Aug 12-13 surface v3
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "recent-refresh-trigger.txt"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: refresh-recent-surface-v3
+  cancel-in-progress: true
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run tests before paid requests
+        run: PYTHONPATH=. pytest -q --ignore=tests/test_app_smoke.py
+
+      - name: Force refresh Aug 12 and Aug 13
+        env:
+          PYTHONUNBUFFERED: "1"
+          MARKETDATA_TOKEN: ${{ secrets.MARKETDATA_TOKEN }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          PYTHONPATH=. python -u scripts/refresh_recent_surfaces.py \
+            --dates 2026-08-12 2026-08-13 \
+            --symbols AUTO
