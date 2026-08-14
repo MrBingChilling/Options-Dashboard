@@ -177,7 +177,7 @@ class MarketDataClient:
         symbol: str,
         analysis_date: date,
     ) -> ChainResult:
-        """Fetch the bounded historical chain used for 1W/1M 25D skew.
+        """Fetch the cheapest bounded chain used as the 25D-priority fallback.
 
         Do not use MarketData's delta filter here. Historical rows can have null
         vendor IV/Greeks, so the 25-delta contract is selected locally after IV
@@ -190,6 +190,27 @@ class MarketDataClient:
             max_dte=SKEW_MAX_DTE,
             min_open_interest=0,
             range_filter="otm",
+            strike_limit=SKEW_STRIKE_LIMIT,
+        )
+
+    def fetch_surface_chain(
+        self,
+        symbol: str,
+        analysis_date: date,
+    ) -> ChainResult:
+        """Fetch the bounded all-moneyness chain used for IV plus GEX/volume.
+
+        The date is always supplied, so after the historical rollover this is
+        billed as historical data. The same 0..45 DTE, 30-strike bound keeps the
+        response finite while retaining ITM and OTM contracts around spot.
+        """
+        return self.fetch_chain(
+            symbol,
+            analysis_date,
+            min_dte=SKEW_MIN_DTE,
+            max_dte=SKEW_MAX_DTE,
+            min_open_interest=0,
+            range_filter="all",
             strike_limit=SKEW_STRIKE_LIMIT,
         )
 
