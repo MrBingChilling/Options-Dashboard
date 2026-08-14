@@ -3,12 +3,15 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from dataclasses import replace
 from datetime import date, timedelta
 from zoneinfo import ZoneInfo
 
 import pandas as pd
 from dateutil.easter import easter
 
+from src.chain_archive import CALCULATION_VERSION, archive_chain
+from src.collection_storage import save_collection_run_best_effort, usage_since
 from src.marketdata_client import MarketDataClient, MarketDataError
 from src.skew_collector import AUTO_SYMBOLS, DAILY_TENORS
 from src.storage import SnapshotStore, SnapshotStoreError
@@ -173,48 +176,102 @@ def _collect_one(
     requested_date: date,
     already_attempted: set[str],
 ):
-    result = client.fetch_skew_chain(symbol, requested_date)
-    actual_date = result.snapshot_date
+    usage_start = len(client.usage_events)
+    result = None
+    archive = None
     saved: list[str] = []
     unavailable: list[str] = []
+    try:
+        result = client.fetch_skew_chain(symbol, requested_date)
+        actual_date = result.snapshot_date
 
-    for tenor, target_dte in DAILY_TENORS.items():
-        if tenor in already_attempted:
-            continue
-        try:
-            snapshot = snapshot_from_chain(
-                symbol,
-                result.data,
-                actual_date,
-                tenor,
-                target_dte=int(target_dte),
-            )
-            if (
-                snapshot.call_25d_iv is None
-                or snapshot.put_25d_iv is None
-                or snapshot.skew_25d is None
-            ):
-                raise ValueError("no usable 25D call/put IV pair")
-            clean = VolatilitySnapshot(
-                symbol=snapshot.symbol,
-                snapshot_date=snapshot.snapshot_date,
-                tenor=snapshot.tenor,
-                target_dte=snapshot.target_dte,
-                actual_dte=snapshot.actual_dte,
-                expiration=snapshot.expiration,
-                spot=snapshot.spot,
-                atm_iv=None,
-                call_25d_iv=snapshot.call_25d_iv,
-                put_25d_iv=snapshot.put_25d_iv,
-                skew_25d=snapshot.skew_25d,
-            )
-            save_volatility_snapshot(store, clean)
-            saved.append(tenor)
-        except ValueError:
-            _save_marker(store, symbol, actual_date, tenor)
-            unavailable.append(tenor)
+        # Only newly fetched ticker-days reach this function. Keep the paid-for
+        # bounded chain before reducing it to dashboard summaries.
+        archive = archive_chain(store, symbol, actual_date, result.data)
 
-    return actual_date, saved, unavailable, len(result.data)
+        for tenor, target_dte in DAILY_TENORS.items():
+            if tenor in already_attempted:
+                continue
+            try:
+                snapshot = snapshot_from_chain(
+                    symbol,
+                    result.data,
+                    actual_date,
+                    tenor,
+                    target_dte=int(target_dte),
+                )
+                if (
+                    snapshot.call_25d_iv is None
+                    or snapshot.put_25d_iv is None
+                    or snapshot.skew_25d is None
+                ):
+                    raise ValueError("no usable 25D call/put IV pair")
+                save_volatility_snapshot(
+                    store,
+                    replace(
+                        snapshot,
+                        archive_path=archive.path,
+                        chain_contract_count=archive.contract_count,
+                        calculation_version=CALCULATION_VERSION,
+                    ),
+                )
+                saved.append(tenor)
+            except ValueError:
+                # 25D remains the required metric for compatibility. Missing 10D
+                # is allowed and is represented by nullable fields.
+                _save_marker(store, symbol, actual_date, tenor)
+                unavailable.append(tenor)
+
+        consumed, remaining = usage_since(client, usage_start)
+        save_collection_run_best_effort(
+            store,
+            {
+                "collector": "backfill_surface_v2",
+                "symbol": symbol.upper(),
+                "requested_date": requested_date.isoformat(),
+                "snapshot_date": actual_date.isoformat(),
+                "status": "saved" if not unavailable else "saved_with_unavailable_tenors",
+                "contract_count": len(result.data),
+                "archive_path": archive.path,
+                "archive_bytes": archive.byte_count,
+                "summary_rows_saved": len(saved),
+                "unavailable_tenors": ",".join(unavailable) or None,
+                "api_credits_consumed": consumed,
+                "api_credits_remaining": remaining,
+                "min_dte": 0,
+                "max_dte": 45,
+                "range_filter": "otm",
+                "strike_limit": 30,
+                "calculation_version": CALCULATION_VERSION,
+            },
+        )
+        return actual_date, saved, unavailable, len(result.data)
+    except (MarketDataError, SnapshotStoreError, ValueError) as exc:
+        consumed, remaining = usage_since(client, usage_start)
+        save_collection_run_best_effort(
+            store,
+            {
+                "collector": "backfill_surface_v2",
+                "symbol": symbol.upper(),
+                "requested_date": requested_date.isoformat(),
+                "snapshot_date": result.snapshot_date.isoformat() if result is not None else None,
+                "status": "failed" if archive is None else "archive_saved_summary_failed",
+                "contract_count": len(result.data) if result is not None else None,
+                "archive_path": archive.path if archive is not None else None,
+                "archive_bytes": archive.byte_count if archive is not None else None,
+                "summary_rows_saved": len(saved),
+                "unavailable_tenors": ",".join(unavailable) or None,
+                "api_credits_consumed": consumed,
+                "api_credits_remaining": remaining,
+                "min_dte": 0,
+                "max_dte": 45,
+                "range_filter": "otm",
+                "strike_limit": 30,
+                "calculation_version": CALCULATION_VERSION,
+                "error": str(exc)[:2000],
+            },
+        )
+        raise
 
 
 def _mark_404(
@@ -258,14 +315,14 @@ def main() -> int:
     skipped_pre_options = len(symbols) * len(sessions) - len(eligible_pairs)
 
     print(
-        f"25D history backfill: {len(symbols)} symbols x {len(sessions)} NYSE sessions; "
+        f"Surface-v2 history backfill: {len(symbols)} symbols x {len(sessions)} NYSE sessions; "
         f"range={sessions[0]}..{sessions[-1]}; tenors=1W,1M; "
         f"max_requests={args.max_requests or 'unlimited'}; credit_reserve={args.credit_reserve}.",
         flush=True,
     )
     print(
-        "Request path: DTE=0..45, range=otm, strikeLimit=30; missing IV/delta "
-        "derived locally from historical option prices.",
+        "Request path unchanged: DTE=0..45, range=otm, strikeLimit=30; one fetched "
+        "chain is archived and reused locally for ATM, 10D and 25D metrics.",
         flush=True,
     )
     print(
@@ -289,7 +346,7 @@ def main() -> int:
     )
     print(
         f"Resume state: {complete_pairs}/{total_pairs} eligible ticker-days already "
-        "saved or attempted; those dates will use zero MarketData credits.",
+        "saved or attempted; those dates use zero MarketData credits and are not rewritten.",
         flush=True,
     )
     if complete_pairs == total_pairs:
@@ -315,7 +372,7 @@ def main() -> int:
     )
 
     if probe_date is not None:
-        print(f"Safety probe: validating {probe_symbol} on {probe_date}...", flush=True)
+        print(f"Safety probe: validating {probe_symbol} on first missing date {probe_date}...", flush=True)
         requests_started += 1
         prior = attempted.get(probe_symbol, {}).get(probe_date, set())
         try:
@@ -431,13 +488,11 @@ def main() -> int:
     )
     if remaining_pairs:
         print(
-            "Run again after the MarketData daily reset; saved rows and unavailable "
-            "markers are both skipped.",
+            "Run again after the MarketData daily reset; all legacy completed rows, "
+            "unavailable markers, and new surface-v2 rows are skipped.",
             flush=True,
         )
-    else:
-        print("One-year 25D call/put IV history is complete where data exists.", flush=True)
-    return 0
+    return 0 if failures == 0 or rows_saved > 0 or markers_saved > 0 else 1
 
 
 if __name__ == "__main__":
