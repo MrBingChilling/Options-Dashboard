@@ -73,7 +73,7 @@ def test_summary_uses_latest_two_fully_complete_sessions():
     assert any("WOLF" in bullet.title for bullet in summary.bullets)
     assert "49" not in summary.bottom_line  # Coverage belongs in page metadata, not prose.
     assert len(summary.bullets) <= 9
-    assert len(" ".join(f"{item.title} {item.body}" for item in summary.bullets).split()) < 650
+    assert len(" ".join(f"{item.title} {item.body}" for item in summary.bullets).split()) <= 520
 
 
 def test_session_is_not_complete_when_one_required_tenor_is_missing():
