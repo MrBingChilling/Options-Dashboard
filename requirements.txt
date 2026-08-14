@@ -2,5 +2,6 @@ streamlit>=1.60,<2
 pandas>=2.2,<3
 numpy>=1.26,<3
 requests>=2.32,<3
+pyarrow>=14,<25
 pytest>=8,<9
 streamlit-lightweight-charts-v5>=0.2,<0.3
