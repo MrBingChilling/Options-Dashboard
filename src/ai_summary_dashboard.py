@@ -71,12 +71,18 @@ def render_ai_summary_dashboard(store: SnapshotStore) -> None:
     else:
         selected_date = available_dates[0]
     report = report_by_date[selected_date]
+    comparison_parts = [f"{report.comparison_date:%b %d} (1D)"]
+    if report.week_comparison_date:
+        comparison_parts.append(f"{report.week_comparison_date:%b %d} (1W)")
+    if report.month_comparison_date:
+        comparison_parts.append(f"{report.month_comparison_date:%b %d} (1M)")
+    comparison_text = ", ".join(comparison_parts)
 
     st.markdown(
         f"""
         <div class="summary-meta">
           <b>{report.snapshot_date:%B %d, %Y}</b> · options data through that market close<br>
-          Compared with {report.comparison_date:%B %d, %Y} ·
+          Compared with {comparison_text} ·
           coverage {report.symbol_count}/{report.expected_symbol_count} tickers · 1W + 1M
         </div>
         """,
@@ -96,7 +102,8 @@ def render_ai_summary_dashboard(store: SnapshotStore) -> None:
         st.markdown(
             """
 - **25Δ skew** means `25Δ call IV − 25Δ put IV`. Positive values price calls richer relative to puts; negative values price puts richer relative to calls.
-- **Daily comparison** uses the immediately preceding fully complete saved session, never a partially collected basket.
+- **1D/1W/1M comparisons** use the nearest fully complete saved sessions to those horizons, never a partially collected basket.
+- **Recent-range percentiles** use up to 60 calendar days of saved history and help distinguish a one-day move from an unusually stretched regime.
 - **Basket statistics** state whether they use the equal-weight mean or the 10% trimmed mean. The trimmed version removes `floor(10% × N)` observations from each tail.
 - **1W and 1M are constant-tenor targets.** The selected expiration can roll as the calendar advances, especially for indexes with daily expirations.
 - **This is a pricing summary, not observed order flow.** Open interest and IV do not prove who bought or sold an option, and the report does not use news or an event calendar.
