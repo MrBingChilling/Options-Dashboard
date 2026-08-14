@@ -79,6 +79,49 @@ def test_http_402_retries_provider_latest_closed_session() -> None:
     assert client.session.get.call_args_list[1].kwargs["params"]["date"] == "2026-07-30"
 
 
+def test_surface_chain_uses_bounded_all_moneyness_request() -> None:
+    expiration = int(datetime(2026, 8, 21, 16, tzinfo=EASTERN).timestamp())
+    updated = int(datetime(2026, 8, 13, 20, tzinfo=EASTERN).timestamp())
+    response = Mock(
+        status_code=200,
+        reason="OK",
+        text="",
+        headers={
+            "X-Api-Ratelimit-Consumed": "1",
+            "X-Api-Ratelimit-Remaining": "99",
+            "X-Api-Ratelimit-Limit": "100",
+        },
+    )
+    response.json.return_value = {
+        "s": "ok",
+        "optionSymbol": ["SPY260821C00630000", "SPY260821P00630000"],
+        "expiration": [expiration, expiration],
+        "side": ["call", "put"],
+        "strike": [630, 630],
+        "dte": [8, 8],
+        "openInterest": [100, 200],
+        "volume": [5, 6],
+        "underlyingPrice": [632.08, 632.08],
+        "iv": [0.2, 0.21],
+        "delta": [0.52, -0.48],
+        "gamma": [0.03, 0.03],
+        "updated": [updated, updated],
+    }
+    client = MarketDataClient("test-token")
+    client.session.get = Mock(return_value=response)
+
+    result = client.fetch_surface_chain("SPY", date(2026, 8, 13))
+
+    assert len(result.data) == 2
+    params = client.session.get.call_args.kwargs["params"]
+    assert params["date"] == "2026-08-13"
+    assert params["from"] == "2026-08-13"
+    assert params["to"] == "2026-09-27"
+    assert params["minOpenInterest"] == 0
+    assert params["range"] == "all"
+    assert params["strikeLimit"] == 30
+
+
 def test_monthly_filter_uses_provider_monthly_parameter() -> None:
     selection = resolve_expiration_filter(FILTER_MONTHLY)
     assert selection.request_params(date(2026, 7, 30)) == {
