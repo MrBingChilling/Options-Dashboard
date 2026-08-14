@@ -64,7 +64,9 @@ def volatility_history(
     base_params: dict[str, str] = {
         "select": (
             "symbol,snapshot_date,tenor,target_dte,actual_dte,expiration,spot,"
-            "atm_iv,call_25d_iv,put_25d_iv,skew_25d"
+            "atm_iv,call_10d_iv,put_10d_iv,skew_10d,"
+            "call_25d_iv,put_25d_iv,skew_25d,archive_path,"
+            "chain_contract_count,calculation_version"
         ),
         "symbol": f"in.({symbol_filter})",
         "tenor": f"eq.{tenor}",
@@ -117,9 +119,13 @@ def volatility_history(
         "actual_dte",
         "spot",
         "atm_iv",
+        "call_10d_iv",
+        "put_10d_iv",
+        "skew_10d",
         "call_25d_iv",
         "put_25d_iv",
         "skew_25d",
+        "chain_contract_count",
     ):
         frame[column] = pd.to_numeric(frame[column], errors="coerce")
 
