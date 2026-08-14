@@ -22,12 +22,11 @@ st.markdown(
 )
 
 # Use explicit navigation rather than Streamlit's legacy automatic pages list.
-# IV & Skew is the first/default route; AI Summary and Gamma Profile follow. Do not pass
+# IV & Skew is the first/default route; Gamma Profile follows. Do not pass
 # text glyphs as icons here: st.Page validates icons as emoji/Material icons,
 # and the old glyphs caused the entrypoint to fail before navigation loaded.
 pages = [
     st.Page("pages/2_IV_and_Skew.py", title="IV & Skew", default=True),
-    st.Page("pages/3_AI_Summary.py", title="AI Summary"),
     st.Page("pages/2_Gamma_Profile.py", title="Gamma Profile"),
 ]
 
