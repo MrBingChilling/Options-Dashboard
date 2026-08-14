@@ -16,20 +16,20 @@ def _event_row(event: MarketEvent, is_next: bool) -> str:
     stamp = event.event_date
     note = f'<span class="calendar-note">{html.escape(event.note)}</span>' if event.note else ""
     next_class = " calendar-row-next" if is_next else ""
-    return f"""
-      <div class="calendar-row{next_class}">
-        <div class="calendar-date-box">
-          <span class="calendar-month">{stamp.strftime('%b').upper()}</span>
-          <span class="calendar-day">{stamp.day}</span>
-        </div>
-        <div class="calendar-copy">
-          <div class="calendar-title">{html.escape(event.title)}</div>
-          <div class="calendar-meta">{stamp.strftime('%A')} · {stamp.isoformat()}</div>
-          {note}
-        </div>
-        <span class="calendar-badge">OPEX</span>
-      </div>
-    """
+    return (
+        f'<div class="calendar-row{next_class}">'
+        '<div class="calendar-date-box">'
+        f'<span class="calendar-month">{stamp.strftime("%b").upper()}</span>'
+        f'<span class="calendar-day">{stamp.day}</span>'
+        '</div>'
+        '<div class="calendar-copy">'
+        f'<div class="calendar-title">{html.escape(event.title)}</div>'
+        f'<div class="calendar-meta">{stamp.strftime("%A")} · {stamp.isoformat()}</div>'
+        f'{note}'
+        '</div>'
+        '<span class="calendar-badge">OPEX</span>'
+        '</div>'
+    )
 
 
 def render_calendar_dashboard() -> None:
