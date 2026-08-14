@@ -306,6 +306,10 @@ def historical_tradingview_config(series: pd.DataFrame) -> list[dict[str, object
     return [
         {
             "chart": {
+                "localization": {
+                    "locale": "en-CA",
+                    "dateFormat": "yyyy-MM-dd",
+                },
                 "layout": {
                     "background": {"color": "#081225"},
                     "textColor": "#D1D7E3",

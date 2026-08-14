@@ -439,15 +439,20 @@ def _chart_document(payload: str) -> str:
       return '';
     }};
     const compact = (v) => {{ const a=Math.abs(v); return a>=1000 ? `${{(v/1000).toFixed(1)}}k` : a>=1 ? v.toFixed(2) : v.toFixed(4); }};
+    const formatTime = (time) => {{
+      const key = keyOf(time);
+      return Object.prototype.hasOwnProperty.call(labels, key) ? labels[key] : key;
+    }};
     const chart = LightweightCharts.createChart(host, {{
       width: host.clientWidth,
       height: host.clientHeight,
       layout: {{ background: {{ color: '#0E1525' }}, textColor: '#A8B3C7', fontSize: 11 }},
+      localization: {{ locale: 'en-CA', dateFormat: 'yyyy-MM-dd', timeFormatter: formatTime }},
       grid: {{ vertLines: {{ color: 'rgba(139,151,173,.07)' }}, horzLines: {{ color: 'rgba(139,151,173,.10)' }} }},
       crosshair: {{ mode: LightweightCharts.CrosshairMode.Normal, vertLine: {{ color: '#60708F', labelBackgroundColor: '#27344E' }}, horzLine: {{ color: '#60708F', labelBackgroundColor: '#27344E' }} }},
       rightPriceScale: {{ visible: spec.rightScale !== false, borderColor: '#2B3752', scaleMargins: spec.priceScaleMargins || {{ top: .08, bottom: .08 }} }},
       leftPriceScale: {{ visible: !!spec.leftScale, borderColor: '#2B3752' }},
-      timeScale: {{ borderColor: '#2B3752', timeVisible: false, rightOffset: (spec.gammaProfile || []).length ? 18 : 3, barSpacing: 8, minBarSpacing: 2, tickMarkFormatter: (time) => labels[keyOf(time)] || keyOf(time).slice(5) }},
+      timeScale: {{ borderColor: '#2B3752', timeVisible: false, rightOffset: (spec.gammaProfile || []).length ? 18 : 3, barSpacing: 8, minBarSpacing: 2, tickMarkFormatter: formatTime }},
       handleScroll: {{ mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: true }},
       handleScale: {{ axisPressedMouseMove: true, mouseWheel: true, pinch: true }},
       kineticScroll: {{ mouse: true, touch: true }},
@@ -485,7 +490,7 @@ def _chart_document(payload: str) -> str:
     const tip = document.getElementById('tip');
     chart.subscribeCrosshairMove((param) => {{
       if (!param.time || !param.point || param.point.x < 0 || param.point.y < 0) {{ tip.style.display = 'none'; return; }}
-      const rows = [`<strong>${{labels[keyOf(param.time)] || keyOf(param.time)}}</strong>`];
+      const rows = [`<strong>${{formatTime(param.time)}}</strong>`];
       apis.forEach(({{api,item}}) => {{ const datum = param.seriesData.get(api); if (!datum) return; const value = datum.value ?? datum.close; if (value !== undefined) rows.push(`<span style="color:${{item.color}}">●</span> ${{item.name}}: ${{Number(value).toLocaleString(undefined, {{maximumFractionDigits: 4}})}}`); }});
       tip.innerHTML = rows.join('<br>'); tip.style.display = 'block';
     }});

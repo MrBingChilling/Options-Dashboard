@@ -374,12 +374,12 @@ def render_archived_gamma_dashboard(store: SnapshotStore) -> None:
         return
 
     options = archives["symbol"].astype(str).tolist()
-    default_index = options.index("SPY") if "SPY" in options else 0
+    default_index = options.index("QQQ") if "QQQ" in options else 0
     symbol = st.selectbox(
         "Ticker",
         options,
         index=default_index,
-        key="iv_gamma_symbol",
+        key="iv_gamma_symbol_v2",
         help="One ticker at a time. The list includes automatic-daily symbols with an archived chain.",
     )
     row = archives.loc[archives["symbol"] == symbol].iloc[-1]
