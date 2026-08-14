@@ -34,6 +34,9 @@ jobs:
       - name: Run surface v3 storage and credit-priority tests
         run: PYTHONPATH=. pytest -q --ignore=tests/test_app_smoke.py
 
+      - name: Wait for MarketData one-device cooldown
+        run: sleep 330
+
       - name: Resume remaining historical data only
         env:
           PYTHONUNBUFFERED: "1"
