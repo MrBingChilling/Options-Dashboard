@@ -1,14 +1,15 @@
 from __future__ import annotations
 
+from datetime import date, timedelta
 from io import BytesIO
 
-import altair as alt
 import numpy as np
 import pandas as pd
 import requests
 import streamlit as st
 
 from src.analytics import STANDARD, find_gamma_flip, gamma_curve
+from src.charts import render_chart
 from src.skew_collector import AUTO_SYMBOLS
 from src.storage import SnapshotStore, SnapshotStoreError
 from src.volatility_storage import volatility_history
@@ -16,8 +17,6 @@ from src.volatility_storage import volatility_history
 CALL_COLOR = "#F43F5E"
 PUT_COLOR = "#10B981"
 AGG_COLOR = "#6384FF"
-SPOT_COLOR = "#AAB3C5"
-FLIP_COLOR = "#F97316"
 CONTRACT_MULTIPLIER = 100.0
 
 
@@ -154,114 +153,196 @@ def _gamma_flip(chain: pd.DataFrame, spot: float) -> float | None:
     return find_gamma_flip(curve, spot)
 
 
-def _vertical_rule(value: float, color: str, dash: list[int], width: float = 1.5) -> alt.Chart:
-    return (
-        alt.Chart(pd.DataFrame({"x": [float(value)]}))
-        .mark_rule(color=color, strokeDash=dash, strokeWidth=width)
-        .encode(x=alt.X("x:Q"))
-    )
-
-
-def gamma_exposure_chart(
+def focused_strike_window(
     profile: pd.DataFrame,
     spot: float,
     call_wall: float | None,
     put_wall: float | None,
-    gamma_flip: float | None,
-) -> alt.Chart:
-    data = profile.copy()
-    data["call_gex_mm"] = data["call_gex"] / 1e6
-    data["put_gex_mm"] = data["put_gex"] / 1e6
-    data["aggregate_gex_mm"] = data["aggregate_gex"] / 1e6
-    bars = pd.concat(
-        [
-            data[["strike", "call_gex_mm"]].rename(columns={"call_gex_mm": "value"}).assign(side="Call"),
-            data[["strike", "put_gex_mm"]].rename(columns={"put_gex_mm": "value"}).assign(side="Put"),
-        ],
-        ignore_index=True,
-    )
-    base = alt.Chart(bars).encode(
-        x=alt.X("strike:Q", title="Strike", axis=alt.Axis(format="~g", labelOverlap=True)),
-        y=alt.Y("value:Q", title="GEX ($mm / 1% move)"),
-        color=alt.Color(
-            "side:N",
-            scale=alt.Scale(domain=["Call", "Put"], range=[CALL_COLOR, PUT_COLOR]),
-            legend=alt.Legend(title=None, orient="bottom"),
-        ),
-        tooltip=[
-            alt.Tooltip("side:N", title="Side"),
-            alt.Tooltip("strike:Q", title="Strike", format=".2f"),
-            alt.Tooltip("value:Q", title="GEX ($mm)", format=",.2f"),
-        ],
-    )
-    bar_layer = base.mark_bar(size=8, opacity=0.95)
-    aggregate = (
-        alt.Chart(data)
-        .mark_line(color=AGG_COLOR, strokeWidth=2.4)
-        .encode(
-            x=alt.X("strike:Q"),
-            y=alt.Y("aggregate_gex_mm:Q", title="Aggregate GEX ($mm)", axis=alt.Axis(orient="right")),
-            tooltip=[
-                alt.Tooltip("strike:Q", title="Strike", format=".2f"),
-                alt.Tooltip("aggregate_gex_mm:Q", title="Aggregate GEX ($mm)", format=",.2f"),
-            ],
+) -> tuple[float, float]:
+    """Choose a compact mobile-first window that keeps spot and both walls visible."""
+    strikes = pd.to_numeric(profile["strike"], errors="coerce").dropna().sort_values().unique()
+    if len(strikes) == 0:
+        return spot * 0.95, spot * 1.05
+    full_min, full_max = float(strikes[0]), float(strikes[-1])
+    anchors = [float(spot)]
+    for value in (call_wall, put_wall):
+        if value is not None and np.isfinite(value):
+            anchors.append(float(value))
+    anchor_min, anchor_max = min(anchors), max(anchors)
+    min_span = max(abs(spot) * 0.08, 1.0)
+    span = max(anchor_max - anchor_min, min_span)
+    padding = max(span * 0.18, abs(spot) * 0.012)
+    low = max(full_min, anchor_min - padding)
+    high = min(full_max, anchor_max + padding)
+    if low >= high:
+        return full_min, full_max
+    return float(low), float(high)
+
+
+def _numeric_strike_axis(profile: pd.DataFrame) -> tuple[list[str], dict[str, str]]:
+    origin = date(2000, 1, 1)
+    times = [(origin + timedelta(days=index)).isoformat() for index in range(len(profile))]
+    labels = {
+        time: f"{float(strike):g}"
+        for time, strike in zip(times, pd.to_numeric(profile["strike"], errors="coerce"))
+    }
+    return times, labels
+
+
+def _marker_time(profile: pd.DataFrame, times: list[str], strike: float | None) -> str | None:
+    if strike is None or not np.isfinite(strike) or profile.empty:
+        return None
+    strikes = pd.to_numeric(profile["strike"], errors="coerce").to_numpy(float)
+    index = int(np.nanargmin(np.abs(strikes - float(strike))))
+    return times[index]
+
+
+def gamma_exposure_spec(
+    profile: pd.DataFrame,
+    call_wall: float | None,
+    put_wall: float | None,
+) -> dict[str, object]:
+    """TradingView-style, touch-friendly GEX-by-strike chart specification."""
+    data = profile.reset_index(drop=True).copy()
+    times, labels = _numeric_strike_axis(data)
+    call_markers = []
+    put_markers = []
+    call_time = _marker_time(data, times, call_wall)
+    put_time = _marker_time(data, times, put_wall)
+    if call_time is not None:
+        call_markers.append(
+            {
+                "time": call_time,
+                "position": "aboveBar",
+                "color": CALL_COLOR,
+                "shape": "arrowDown",
+                "text": f"Call Wall {call_wall:g}",
+            }
         )
-    )
-
-    min_strike = float(data["strike"].min())
-    max_strike = float(data["strike"].max())
-    rules: list[alt.Chart] = []
-    if min_strike <= spot <= max_strike:
-        rules.append(_vertical_rule(spot, SPOT_COLOR, [5, 5]))
-    if gamma_flip is not None and min_strike <= gamma_flip <= max_strike:
-        rules.append(_vertical_rule(gamma_flip, FLIP_COLOR, [3, 4]))
-    if call_wall is not None and min_strike <= call_wall <= max_strike:
-        rules.append(_vertical_rule(call_wall, CALL_COLOR, [2, 3], 1.8))
-    if put_wall is not None and min_strike <= put_wall <= max_strike:
-        rules.append(_vertical_rule(put_wall, PUT_COLOR, [2, 3], 1.8))
-
-    return (
-        alt.layer(bar_layer, aggregate, *rules)
-        .resolve_scale(y="independent")
-        .properties(height=430, title="Gamma Exposure")
-        .configure_view(strokeOpacity=0)
-        .configure_axis(gridColor="#293144", domainColor="#4A556C", tickColor="#4A556C")
-    )
-
-
-def volume_by_strike_chart(profile: pd.DataFrame) -> alt.Chart:
-    data = profile.copy()
-    calls = data[["strike", "call_volume"]].rename(columns={"call_volume": "value"}).assign(side="Call")
-    puts = data[["strike", "put_volume"]].rename(columns={"put_volume": "value"}).assign(side="Put")
-    puts["value"] = -puts["value"]
-    bars = pd.concat([calls, puts], ignore_index=True)
-    return (
-        alt.Chart(bars)
-        .mark_bar(size=8, opacity=0.95)
-        .encode(
-            x=alt.X("strike:Q", title="Strike", axis=alt.Axis(format="~g", labelOverlap=True)),
-            y=alt.Y("value:Q", title="Contracts (puts shown below zero)"),
-            color=alt.Color(
-                "side:N",
-                scale=alt.Scale(domain=["Call", "Put"], range=[CALL_COLOR, PUT_COLOR]),
-                legend=alt.Legend(title=None, orient="bottom"),
-            ),
-            tooltip=[
-                alt.Tooltip("side:N", title="Side"),
-                alt.Tooltip("strike:Q", title="Strike", format=".2f"),
-                alt.Tooltip("value:Q", title="Signed volume", format=",.0f"),
-            ],
+    if put_time is not None:
+        put_markers.append(
+            {
+                "time": put_time,
+                "position": "belowBar",
+                "color": PUT_COLOR,
+                "shape": "arrowUp",
+                "text": f"Put Wall {put_wall:g}",
+            }
         )
-        .properties(height=340, title="Volume by Strike Price")
-        .configure_view(strokeOpacity=0)
-        .configure_axis(gridColor="#293144", domainColor="#4A556C", tickColor="#4A556C")
-    )
+
+    call_data = [
+        {"time": time, "value": float(value) / 1e6}
+        for time, value in zip(times, data["call_gex"])
+    ]
+    put_data = [
+        {"time": time, "value": float(value) / 1e6}
+        for time, value in zip(times, data["put_gex"])
+    ]
+    aggregate_data = [
+        {"time": time, "value": float(value) / 1e6}
+        for time, value in zip(times, data["aggregate_gex"])
+    ]
+    return {
+        "title": "Gamma Exposure",
+        "subtitle": "Pinch/scroll to zoom · drag to pan · drag either price axis to rescale",
+        "numericLabels": labels,
+        "leftScale": True,
+        "rightScale": True,
+        "series": [
+            {
+                "name": "Call",
+                "color": CALL_COLOR,
+                "type": "histogram",
+                "data": call_data,
+                "options": {
+                    "priceScaleId": "left",
+                    "priceFormat": {"type": "custom", "formatter": "compact"},
+                    "lastValueVisible": False,
+                    "priceLineVisible": False,
+                    "markers": call_markers,
+                },
+            },
+            {
+                "name": "Put",
+                "color": PUT_COLOR,
+                "type": "histogram",
+                "data": put_data,
+                "options": {
+                    "priceScaleId": "left",
+                    "priceFormat": {"type": "custom", "formatter": "compact"},
+                    "lastValueVisible": False,
+                    "priceLineVisible": False,
+                    "markers": put_markers,
+                },
+            },
+            {
+                "name": "Aggregate GEX",
+                "color": AGG_COLOR,
+                "type": "line",
+                "data": aggregate_data,
+                "options": {
+                    "priceScaleId": "right",
+                    "priceFormat": {"type": "custom", "formatter": "compact"},
+                    "lineWidth": 3,
+                    "lastValueVisible": True,
+                    "priceLineVisible": False,
+                },
+            },
+        ],
+    }
+
+
+def volume_by_strike_spec(profile: pd.DataFrame) -> dict[str, object]:
+    """Touch-friendly call-positive / put-negative volume chart."""
+    data = profile.reset_index(drop=True).copy()
+    times, labels = _numeric_strike_axis(data)
+    calls = [
+        {"time": time, "value": float(value)}
+        for time, value in zip(times, data["call_volume"])
+    ]
+    puts = [
+        {"time": time, "value": -float(value)}
+        for time, value in zip(times, data["put_volume"])
+    ]
+    return {
+        "title": "Volume by Strike Price",
+        "subtitle": "Calls above zero · puts below zero · pinch/scroll to zoom · drag to pan",
+        "numericLabels": labels,
+        "leftScale": True,
+        "rightScale": False,
+        "series": [
+            {
+                "name": "Call",
+                "color": CALL_COLOR,
+                "type": "histogram",
+                "data": calls,
+                "options": {
+                    "priceScaleId": "left",
+                    "priceFormat": {"type": "custom", "formatter": "compact"},
+                    "lastValueVisible": False,
+                    "priceLineVisible": False,
+                },
+            },
+            {
+                "name": "Put",
+                "color": PUT_COLOR,
+                "type": "histogram",
+                "data": puts,
+                "options": {
+                    "priceScaleId": "left",
+                    "priceFormat": {"type": "custom", "formatter": "compact"},
+                    "lastValueVisible": False,
+                    "priceLineVisible": False,
+                },
+            },
+        ],
+    }
 
 
 def render_archived_gamma_dashboard(store: SnapshotStore) -> None:
     st.caption(
         "Gamma exposure and option volume reconstructed from the latest archived daily bounded chain. "
-        "Changing ticker, expiration, or strike range reads Supabase only and uses 0 MarketData credits."
+        "Changing ticker, expiration, strike view, zoom, or axes reads Supabase only and uses 0 MarketData credits."
     )
     if not store.enabled:
         st.info("Configure Supabase to load archived option chains.")
@@ -307,7 +388,8 @@ def render_archived_gamma_dashboard(store: SnapshotStore) -> None:
         st.info("The archived chain has no expiration dates.")
         return
 
-    expiration = st.selectbox(
+    control_left, control_right = st.columns([1.4, 1.0])
+    expiration = control_left.selectbox(
         "Expiration",
         expirations,
         index=0,
@@ -324,48 +406,63 @@ def render_archived_gamma_dashboard(store: SnapshotStore) -> None:
         st.error(str(exc))
         return
 
+    call_wall, put_wall = _wall_levels(profile)
+    flip = _gamma_flip(expiry_chain, spot)
+    strike_view = control_right.selectbox(
+        "Strike view",
+        ["Focus", "Full", "Custom"],
+        index=0,
+        help="Focus keeps spot and both walls in view. Use the chart itself to pinch/zoom and pan.",
+    )
+
     strikes = profile["strike"].dropna().astype(float).sort_values().unique()
     if len(strikes) == 0:
         st.info("No strikes are available for that expiration.")
         return
     min_strike, max_strike = float(strikes[0]), float(strikes[-1])
-    if len(strikes) > 1:
-        diffs = np.diff(strikes)
-        positive = diffs[diffs > 0]
-        step = float(np.min(positive)) if len(positive) else 1.0
+    if strike_view == "Focus":
+        low, high = focused_strike_window(profile, spot, call_wall, put_wall)
+    elif strike_view == "Full":
+        low, high = min_strike, max_strike
     else:
-        step = max(abs(min_strike) * 0.01, 0.5)
-    strike_range = st.slider(
-        "Strike range",
-        min_value=min_strike,
-        max_value=max_strike,
-        value=(min_strike, max_strike),
-        step=step,
-        key=f"iv_gamma_strike_range_{symbol}_{expiration}",
-    )
-    visible = profile[profile["strike"].between(strike_range[0], strike_range[1])].copy()
+        if len(strikes) > 1:
+            positive = np.diff(strikes)
+            positive = positive[positive > 0]
+            step = float(np.min(positive)) if len(positive) else 1.0
+        else:
+            step = max(abs(min_strike) * 0.01, 0.5)
+        low, high = st.slider(
+            "Custom strike range",
+            min_value=min_strike,
+            max_value=max_strike,
+            value=(min_strike, max_strike),
+            step=step,
+            key=f"iv_gamma_strike_range_{symbol}_{expiration}",
+        )
+
+    visible = profile[profile["strike"].between(low, high)].copy()
     if visible.empty:
         st.info("No strikes fall inside the selected range.")
         return
 
-    call_wall, put_wall = _wall_levels(profile)
-    flip = _gamma_flip(expiry_chain, spot)
     latest_date = pd.Timestamp(row["snapshot_date"]).date()
     metrics = st.columns(4)
-    metrics[0].metric("Snapshot spot", f"${spot:,.2f}")
+    metrics[0].metric("Spot", f"${spot:,.2f}")
     metrics[1].metric("Call wall", f"${call_wall:,.2f}" if call_wall is not None else "—")
     metrics[2].metric("Put wall", f"${put_wall:,.2f}" if put_wall is not None else "—")
     metrics[3].metric("Gamma flip", f"${flip:,.2f}" if flip is not None else "—")
     st.caption(
-        f"Saved chain: {latest_date:%Y-%m-%d} · expiration {expiration:%Y-%m-%d} · "
-        f"{len(expiry_chain):,} contracts in this expiration. Standard display convention: calls positive, puts negative."
+        f"Saved chain {latest_date:%Y-%m-%d} · expiration {expiration:%Y-%m-%d} · "
+        f"{len(expiry_chain):,} contracts. Standard display convention: calls positive, puts negative."
     )
-    st.altair_chart(
-        gamma_exposure_chart(visible, spot, call_wall, put_wall, flip),
-        use_container_width=True,
-    )
-    st.altair_chart(volume_by_strike_chart(visible), use_container_width=True)
+
+    render_chart(gamma_exposure_spec(visible, call_wall, put_wall), height=455)
     st.caption(
-        "Blue Aggregate GEX is the cumulative net call-minus-put gamma exposure across the displayed strikes. "
-        "Vertical lines: gray = saved spot, orange = gamma flip, red = call wall, green = put wall."
+        "Wall labels now match the reference style: Call Wall is marked above the red bar with a downward arrow; "
+        "Put Wall is marked below the green bar with an upward arrow. Tap legend chips to hide/show a series."
+    )
+    render_chart(volume_by_strike_spec(visible), height=380)
+    st.caption(
+        "Both charts use the same touch-friendly Lightweight Charts engine as the TradingView-style history view. "
+        "On mobile: pinch to zoom, drag horizontally to pan, and drag a price axis vertically to expand/compress that scale."
     )
