@@ -1,0 +1,1 @@
+Upgrade 2026-01-02 through 2026-06-22 legacy rows to surface_v3_gex.
