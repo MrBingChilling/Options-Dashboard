@@ -1,0 +1,1 @@
+Validate surface-v2 storage and one-request historical resume.
