@@ -2,6 +2,7 @@ import pandas as pd
 import pytest
 
 from src.archived_gamma_dashboard import (
+    _wall_levels,
     focused_strike_window,
     gamma_exposure_spec,
     profile_from_archive,
@@ -65,7 +66,24 @@ def test_profile_aggregate_gex_is_cumulative_net_by_strike():
     assert profile["aggregate_gex"].iloc[1] == pytest.approx(profile["net_gex"].sum())
 
 
-def test_gamma_spec_uses_dual_interactive_scales_and_reference_style_wall_markers():
+def test_multi_expiration_profile_can_produce_distinct_call_and_put_walls():
+    chain = pd.DataFrame(
+        [
+            {"expiration": "2026-08-14", "strike": 100.0, "side": "call", "underlyingPrice": 100.0, "openInterest": 100, "volume": 0, "gamma_used": 0.02},
+            {"expiration": "2026-08-14", "strike": 100.0, "side": "put", "underlyingPrice": 100.0, "openInterest": 100, "volume": 0, "gamma_used": 0.02},
+            {"expiration": "2026-08-21", "strike": 110.0, "side": "call", "underlyingPrice": 100.0, "openInterest": 500, "volume": 0, "gamma_used": 0.02},
+            {"expiration": "2026-08-21", "strike": 90.0, "side": "put", "underlyingPrice": 100.0, "openInterest": 600, "volume": 0, "gamma_used": 0.02},
+        ]
+    )
+
+    full_profile, _ = profile_from_archive(chain)
+    call_wall, put_wall = _wall_levels(full_profile)
+
+    assert call_wall == pytest.approx(110.0)
+    assert put_wall == pytest.approx(90.0)
+
+
+def test_gamma_spec_uses_dual_interactive_scales_reference_markers_and_bar_gaps():
     profile = pd.DataFrame(
         {
             "strike": [95.0, 100.0, 105.0],
@@ -92,6 +110,11 @@ def test_gamma_spec_uses_dual_interactive_scales_and_reference_style_wall_marker
     assert put_marker["shape"] == "arrowUp"
     assert put_marker["position"] == "belowBar"
     assert put_marker["text"] == "Put Wall 95"
+    call_data = spec["series"][0]["data"]
+    assert len(call_data) == 5
+    assert "value" in call_data[0]
+    assert "value" not in call_data[1]
+    assert "value" in call_data[2]
 
 
 def test_volume_spec_puts_are_negative_and_chart_uses_one_left_scale():
@@ -108,6 +131,7 @@ def test_volume_spec_puts_are_negative_and_chart_uses_one_left_scale():
     assert spec["leftScale"] is True
     assert spec["rightScale"] is False
     assert spec["series"][0]["data"][0]["value"] == pytest.approx(10.0)
+    assert "value" not in spec["series"][0]["data"][1]
     assert spec["series"][1]["data"][0]["value"] == pytest.approx(-4.0)
 
 
