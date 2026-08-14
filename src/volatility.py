@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 from datetime import date
 from typing import Iterable
 
@@ -13,6 +13,7 @@ from src.analytics import black_scholes_delta, derive_implied_volatility
 TENORS = {"1W": 7, "1M": 30, "3M": 90, "6M": 180}
 DEFAULT_RISK_FREE_RATE = 0.04
 DEFAULT_DIVIDEND_YIELD = 0.0
+CALCULATION_VERSION = "surface_v2"
 
 
 @dataclass(frozen=True)
@@ -28,6 +29,12 @@ class VolatilitySnapshot:
     call_25d_iv: float | None
     put_25d_iv: float | None
     skew_25d: float | None
+    call_10d_iv: float | None = None
+    put_10d_iv: float | None = None
+    skew_10d: float | None = None
+    archive_path: str | None = None
+    chain_contract_count: int | None = None
+    calculation_version: str | None = None
 
     def record(self) -> dict:
         row = asdict(self)
@@ -117,6 +124,11 @@ def _prepare_expiry_chain(
             "The chain has no usable IV data and IV could not be derived from option prices."
         )
     expiry_chain["iv_used"] = iv_used
+    expiry_chain["iv_source"] = np.where(
+        valid_vendor_iv,
+        "vendor",
+        np.where(valid_iv, "derived_from_option_price", "unavailable"),
+    )
 
     model_delta = black_scholes_delta(
         spot,
@@ -141,6 +153,11 @@ def _prepare_expiry_chain(
         valid_vendor_delta,
         vendor_delta,
         np.where(valid_model_delta, model_delta, np.nan),
+    )
+    expiry_chain["delta_source"] = np.where(
+        valid_vendor_delta,
+        "vendor",
+        np.where(valid_model_delta, "black_scholes_from_iv", "unavailable"),
     )
 
     return expiry_chain, expiration_ts, actual_dte, spot
@@ -182,9 +199,12 @@ def snapshot_from_chain(
     expiry_chain, expiration_ts, actual_dte, spot = _prepare_expiry_chain(work, target)
 
     atm = _atm_iv(expiry_chain, spot)
-    call_iv = _delta_iv(expiry_chain, "call", 0.25)
-    put_iv = _delta_iv(expiry_chain, "put", -0.25)
-    skew = call_iv - put_iv if call_iv is not None and put_iv is not None else None
+    call_25d = _delta_iv(expiry_chain, "call", 0.25)
+    put_25d = _delta_iv(expiry_chain, "put", -0.25)
+    skew_25d = call_25d - put_25d if call_25d is not None and put_25d is not None else None
+    call_10d = _delta_iv(expiry_chain, "call", 0.10)
+    put_10d = _delta_iv(expiry_chain, "put", -0.10)
+    skew_10d = call_10d - put_10d if call_10d is not None and put_10d is not None else None
 
     return VolatilitySnapshot(
         symbol=symbol.upper(),
@@ -195,9 +215,13 @@ def snapshot_from_chain(
         expiration=expiration_ts.date(),
         spot=spot,
         atm_iv=atm,
-        call_25d_iv=call_iv,
-        put_25d_iv=put_iv,
-        skew_25d=skew,
+        call_25d_iv=call_25d,
+        put_25d_iv=put_25d,
+        skew_25d=skew_25d,
+        call_10d_iv=call_10d,
+        put_10d_iv=put_10d,
+        skew_10d=skew_10d,
+        calculation_version=CALCULATION_VERSION,
     )
 
 
