@@ -5,7 +5,7 @@ import pandas as pd
 import pytest
 
 from src.analytics import black_scholes_price
-from src.volatility import snapshot_from_chain
+from src.volatility import CALCULATION_VERSION, snapshot_from_chain
 
 
 def sample_chain() -> pd.DataFrame:
@@ -56,14 +56,18 @@ def zero_vendor_iv_chain() -> pd.DataFrame:
     return chain
 
 
-def test_snapshot_uses_constant_tenor_and_call_minus_put_skew():
+def test_snapshot_uses_constant_tenor_and_surface_metrics():
     snapshot = snapshot_from_chain("XYZ", sample_chain(), date(2026, 8, 12), "1M")
 
     assert snapshot.actual_dte == 30
+    assert snapshot.call_10d_iv == pytest.approx(0.43)
+    assert snapshot.put_10d_iv == pytest.approx(0.38)
+    assert snapshot.skew_10d == pytest.approx(0.05)
     assert snapshot.call_25d_iv == pytest.approx(0.36)
     assert snapshot.put_25d_iv == pytest.approx(0.32)
     assert snapshot.skew_25d == pytest.approx(0.04)
     assert snapshot.atm_iv == pytest.approx((0.30 + 0.32) / 2)
+    assert snapshot.calculation_version == CALCULATION_VERSION
 
 
 def test_snapshot_derives_iv_and_delta_when_vendor_greeks_are_zero():
@@ -76,11 +80,16 @@ def test_snapshot_derives_iv_and_delta_when_vendor_greeks_are_zero():
     assert snapshot.call_25d_iv is not None and snapshot.call_25d_iv > 0
     assert snapshot.put_25d_iv is not None and snapshot.put_25d_iv > 0
     assert snapshot.skew_25d is not None and np.isfinite(snapshot.skew_25d)
+    assert snapshot.call_10d_iv is not None and snapshot.call_10d_iv > 0
+    assert snapshot.put_10d_iv is not None and snapshot.put_10d_iv > 0
 
 
-def test_snapshot_record_serializes_dates():
+def test_snapshot_record_serializes_dates_and_surface_fields():
     record = snapshot_from_chain("XYZ", sample_chain(), date(2026, 8, 12), "1M").record()
 
     assert record["snapshot_date"] == "2026-08-12"
     assert record["expiration"] == "2026-09-11"
     assert record["tenor"] == "1M"
+    assert record["atm_iv"] is not None
+    assert record["call_10d_iv"] == pytest.approx(0.43)
+    assert record["calculation_version"] == CALCULATION_VERSION
