@@ -1,10 +1,26 @@
 name: Daily 25D skew snapshot
 
 on:
+  # Primary weekday run at 07:10 Vancouver time, with backup trigger
+  # opportunities through 08:10. The collector checks Supabase first and
+  # exits with 0 MarketData requests when the session is already complete.
   schedule:
     - cron: "10 7 * * 1-5"
       timezone: "America/Vancouver"
+    - cron: "25 7 * * 1-5"
+      timezone: "America/Vancouver"
+    - cron: "40 7 * * 1-5"
+      timezone: "America/Vancouver"
+    - cron: "55 7 * * 1-5"
+      timezone: "America/Vancouver"
+    - cron: "10 8 * * 1-5"
+      timezone: "America/Vancouver"
   workflow_dispatch:
+  # Temporary one-commit trigger so today's missed scheduled collection runs.
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/daily_skew.yml"
 
 concurrency:
   group: daily-25d-skew
