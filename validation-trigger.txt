@@ -1,1 +1,1 @@
-Pause the active surface-v2 historical backfill while the GEX-capable archive and credit-priority collector are upgraded.
+Resume only the still-missing historical ticker-days using surface_v3_gex after the storage, gamma, and 25D-priority credit-budget upgrade.
