@@ -1,0 +1,51 @@
+name: Validate surface v2 storage
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "validation-trigger.txt"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: validate-surface-v2-storage
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run unit tests
+        run: PYTHONPATH=. pytest -q
+
+      - name: Fetch and persist exactly one missing ticker-day
+        env:
+          PYTHONUNBUFFERED: "1"
+          MARKETDATA_TOKEN: ${{ secrets.MARKETDATA_TOKEN }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          PYTHONPATH=. python -u scripts/backfill_25d_history.py \
+            --symbols AUTO \
+            --start 2025-08-13 \
+            --end 2026-08-12 \
+            --max-requests 1 \
+            --credit-reserve 100 \
+            --probe-symbol SPY
