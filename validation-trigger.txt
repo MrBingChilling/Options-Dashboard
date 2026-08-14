@@ -1,1 +1,1 @@
-Validate surface-v2 storage and one-request historical resume. Retry 2.
+Trigger the remaining surface-v2 historical backfill after successful one-request validation.
