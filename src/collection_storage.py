@@ -23,26 +23,30 @@ def usage_since(client: MarketDataClient, start_index: int) -> tuple[int | None,
     return (sum(consumed_values) if consumed_values else None, remaining)
 
 
-def credits_consumed_for_requested_date(
+def _collection_rows(
     store: SnapshotStore,
     collector: str,
     requested_date: date,
-) -> int:
-    """Return credits already logged for one collector/session across retries.
-
-    Daily-skew backup workflows run several times. Summing the audit rows makes
-    the credit ceiling shared by all of those runs instead of resetting per job.
-    """
+    select: str,
+    *,
+    order: str | None = None,
+    limit: int | None = None,
+) -> list[dict[str, Any]]:
     if not store.enabled:
         raise SnapshotStoreError("Supabase is not configured.")
+    params: dict[str, str | int] = {
+        "select": select,
+        "collector": f"eq.{collector}",
+        "requested_date": f"eq.{requested_date.isoformat()}",
+    }
+    if order:
+        params["order"] = order
+    if limit is not None:
+        params["limit"] = int(limit)
     response = requests.get(
         f"{store.url}/rest/v1/{COLLECTION_RUNS_TABLE}",
         headers=store.headers,
-        params={
-            "select": "api_credits_consumed",
-            "collector": f"eq.{collector}",
-            "requested_date": f"eq.{requested_date.isoformat()}",
-        },
+        params=params,
         timeout=store.timeout,
     )
     if response.status_code != 200:
@@ -56,10 +60,23 @@ def credits_consumed_for_requested_date(
         raise SnapshotStoreError("Supabase collection audit returned invalid JSON.") from exc
     if not isinstance(rows, list):
         raise SnapshotStoreError("Supabase collection audit returned an invalid payload.")
+    return [row for row in rows if isinstance(row, dict)]
+
+
+def credits_consumed_for_requested_date(
+    store: SnapshotStore,
+    collector: str,
+    requested_date: date,
+) -> int:
+    """Return credits already logged for one collector/session across retries."""
+    rows = _collection_rows(
+        store,
+        collector,
+        requested_date,
+        "api_credits_consumed",
+    )
     total = 0
     for row in rows:
-        if not isinstance(row, dict):
-            continue
         value = row.get("api_credits_consumed")
         try:
             if value is not None:
@@ -67,6 +84,33 @@ def credits_consumed_for_requested_date(
         except (TypeError, ValueError):
             continue
     return total
+
+
+def resolved_snapshot_date_for_requested_date(
+    store: SnapshotStore,
+    collector: str,
+    requested_date: date,
+) -> date | None:
+    """Reuse the provider-resolved closed session on backup workflow runs."""
+    rows = _collection_rows(
+        store,
+        collector,
+        requested_date,
+        "snapshot_date,status,created_at",
+        order="created_at.desc",
+        limit=20,
+    )
+    for row in rows:
+        if not str(row.get("status", "")).startswith("saved"):
+            continue
+        raw = row.get("snapshot_date")
+        if not raw:
+            continue
+        try:
+            return date.fromisoformat(str(raw)[:10])
+        except ValueError:
+            continue
+    return None
 
 
 def save_collection_run(store: SnapshotStore, record: dict[str, Any]) -> None:
