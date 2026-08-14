@@ -16,11 +16,6 @@ on:
     - cron: "10 8 * * 1-5"
       timezone: "America/Vancouver"
   workflow_dispatch:
-  # Temporary one-commit trigger so today's missed scheduled collection runs.
-  push:
-    branches: [main]
-    paths:
-      - ".github/workflows/daily_skew.yml"
 
 concurrency:
   group: daily-25d-skew
