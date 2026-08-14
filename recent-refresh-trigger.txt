@@ -1,0 +1,1 @@
+Force-refresh the Aug 12 and Aug 13 2026 daily sessions using the optimized surface_v3_gex structure.
