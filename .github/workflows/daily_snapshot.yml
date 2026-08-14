@@ -1,10 +1,10 @@
-name: Save daily options snapshots
+name: Manual full options snapshot
 
 on:
+  # Deliberately manual-only. Automatic options collection is handled by
+  # daily_skew.yml after the historical rollover so it can share one <100-credit
+  # budget across IV, GEX and volume data.
   workflow_dispatch:
-  schedule:
-    # 01:00 UTC Tuesday-Saturday = after the prior US market session closes.
-    - cron: "0 1 * * 2-6"
 
 permissions:
   contents: read
