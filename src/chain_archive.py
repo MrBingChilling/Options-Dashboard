@@ -8,12 +8,16 @@ import numpy as np
 import pandas as pd
 import requests
 
-from src.analytics import black_scholes_delta, derive_implied_volatility
+from src.analytics import (
+    black_scholes_delta,
+    black_scholes_gamma,
+    derive_implied_volatility,
+)
 from src.storage import SnapshotStore, SnapshotStoreError
 
 
 CHAIN_ARCHIVE_BUCKET = "options-chain-archive"
-CALCULATION_VERSION = "surface_v2"
+CALCULATION_VERSION = "surface_v3_gex"
 DEFAULT_RISK_FREE_RATE = 0.04
 DEFAULT_DIVIDEND_YIELD = 0.0
 
@@ -30,7 +34,7 @@ def prepare_chain_for_archive(
     snapshot_date: date,
     chain: pd.DataFrame,
 ) -> pd.DataFrame:
-    """Return the fetched bounded chain plus reproducible local IV/delta fields."""
+    """Return the paid-for bounded chain with reproducible local IV/Greeks."""
     if chain is None or chain.empty:
         raise ValueError("Cannot archive an empty option chain.")
 
@@ -63,11 +67,12 @@ def prepare_chain_for_archive(
 
     iv_used = np.full(len(frame), np.nan, dtype=float)
     delta_used = np.full(len(frame), np.nan, dtype=float)
+    gamma_used = np.full(len(frame), np.nan, dtype=float)
     iv_source = np.full(len(frame), "unavailable", dtype=object)
     delta_source = np.full(len(frame), "unavailable", dtype=object)
+    gamma_source = np.full(len(frame), "unavailable", dtype=object)
 
-    # Work expiry-by-expiry so the underlying spot and model inputs remain
-    # consistent with the constant-tenor snapshot calculation.
+    # Work expiry-by-expiry so spot and model inputs are internally consistent.
     if "expiration" in frame.columns:
         groups = frame.groupby("expiration", dropna=False).groups.values()
     else:
@@ -95,17 +100,20 @@ def prepare_chain_for_archive(
             local_iv[missing_iv] = derived
 
         valid_iv = np.isfinite(local_iv) & (local_iv > 0)
+        strikes = pd.to_numeric(expiry["strike"], errors="coerce").to_numpy(float)
+        times = pd.to_numeric(expiry["dte"], errors="coerce").to_numpy(float) / 365.0
+        sides = expiry["side"].astype(str).str.lower().to_numpy()
+
         model_delta = black_scholes_delta(
             spot,
-            pd.to_numeric(expiry["strike"], errors="coerce").to_numpy(float),
-            pd.to_numeric(expiry["dte"], errors="coerce").to_numpy(float) / 365.0,
+            strikes,
+            times,
             local_iv,
-            expiry["side"].astype(str).to_numpy(),
+            sides,
             DEFAULT_RISK_FREE_RATE,
             DEFAULT_DIVIDEND_YIELD,
         )
         vendor_delta = pd.to_numeric(expiry.get("delta"), errors="coerce").to_numpy(float)
-        sides = expiry["side"].astype(str).str.lower().to_numpy()
         valid_vendor_delta = (
             np.isfinite(vendor_delta)
             & (
@@ -120,6 +128,26 @@ def prepare_chain_for_archive(
             np.where(valid_model_delta, model_delta, np.nan),
         )
 
+        # Historical vendor gamma can be null or rounded to zero. Prefer a
+        # reproducible Black-Scholes gamma whenever IV is usable; retain vendor
+        # gamma as a fallback and preserve its original column separately.
+        model_gamma = black_scholes_gamma(
+            spot,
+            strikes,
+            times,
+            local_iv,
+            DEFAULT_RISK_FREE_RATE,
+            DEFAULT_DIVIDEND_YIELD,
+        )
+        vendor_gamma = pd.to_numeric(expiry.get("gamma"), errors="coerce").to_numpy(float)
+        valid_model_gamma = valid_iv & np.isfinite(model_gamma) & (model_gamma > 0)
+        valid_vendor_gamma = np.isfinite(vendor_gamma) & (vendor_gamma > 0)
+        local_gamma = np.where(
+            valid_model_gamma,
+            model_gamma,
+            np.where(valid_vendor_gamma, vendor_gamma, np.nan),
+        )
+
         for local_position, index in enumerate(expiry.index):
             output_position = position_by_index[index]
             iv_used[output_position] = local_iv[local_position]
@@ -127,16 +155,25 @@ def prepare_chain_for_archive(
                 iv_source[output_position] = "vendor"
             elif valid_iv[local_position]:
                 iv_source[output_position] = "derived_from_option_price"
+
             delta_used[output_position] = local_delta[local_position]
             if valid_vendor_delta[local_position]:
                 delta_source[output_position] = "vendor"
             elif valid_model_delta[local_position]:
                 delta_source[output_position] = "black_scholes_from_iv"
 
+            gamma_used[output_position] = local_gamma[local_position]
+            if valid_model_gamma[local_position]:
+                gamma_source[output_position] = "black_scholes_from_iv"
+            elif valid_vendor_gamma[local_position]:
+                gamma_source[output_position] = "vendor"
+
     frame["iv_used"] = iv_used
     frame["iv_source"] = iv_source
     frame["delta_used"] = delta_used
     frame["delta_source"] = delta_source
+    frame["gamma_used"] = gamma_used
+    frame["gamma_source"] = gamma_source
     frame["calculation_version"] = CALCULATION_VERSION
 
     preferred = [
@@ -161,6 +198,8 @@ def prepare_chain_for_archive(
         "delta_used",
         "delta_source",
         "gamma",
+        "gamma_used",
+        "gamma_source",
         "theta",
         "vega",
         "calculation_version",
