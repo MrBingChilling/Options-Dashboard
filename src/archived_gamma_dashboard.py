@@ -472,11 +472,67 @@ def render_archived_gamma_dashboard(store: SnapshotStore) -> None:
         return
 
     latest_date = pd.Timestamp(row["snapshot_date"]).date()
-    metrics = st.columns(4)
-    metrics[0].metric("Spot", f"${spot:,.2f}")
-    metrics[1].metric("Call wall", f"${call_wall:,.2f}" if call_wall is not None else "—")
-    metrics[2].metric("Put wall", f"${put_wall:,.2f}" if put_wall is not None else "—")
-    metrics[3].metric("Gamma flip", f"${flip:,.2f}" if flip is not None else "—")
+    metric_items = [
+        ("Spot", f"${spot:,.2f}"),
+        ("Call wall", f"${call_wall:,.2f}" if call_wall is not None else "—"),
+        ("Put wall", f"${put_wall:,.2f}" if put_wall is not None else "—"),
+        ("Gamma flip", f"${flip:,.2f}" if flip is not None else "—"),
+    ]
+    metrics_html = "".join(
+        f'<div class="gamma-metric-item"><span>{label}</span><strong>{value}</strong></div>'
+        for label, value in metric_items
+    )
+    st.markdown(
+        f"""
+        <style>
+          .gamma-metric-strip {{
+            display: grid;
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+            overflow: hidden;
+            margin: .15rem 0 .45rem;
+            background: #141B2D;
+            border: 1px solid #25304A;
+            border-radius: .65rem;
+          }}
+          .gamma-metric-item {{
+            display: flex;
+            align-items: baseline;
+            justify-content: space-between;
+            gap: .45rem;
+            min-width: 0;
+            padding: .48rem .7rem;
+            border-right: 1px solid #25304A;
+          }}
+          .gamma-metric-item:last-child {{border-right: 0;}}
+          .gamma-metric-item span {{
+            color: #A8B3C7;
+            font-size: .74rem;
+            white-space: nowrap;
+          }}
+          .gamma-metric-item strong {{
+            color: #FAFAFA;
+            font-size: 1.05rem;
+            font-weight: 600;
+            line-height: 1.15;
+            white-space: nowrap;
+          }}
+          @media (max-width: 700px) {{
+            .gamma-metric-strip {{grid-template-columns: repeat(2, minmax(0, 1fr));}}
+            .gamma-metric-item {{
+              padding: .42rem .55rem;
+              border-right: 0;
+              border-bottom: 1px solid #25304A;
+            }}
+            .gamma-metric-item:nth-child(odd) {{border-right: 1px solid #25304A;}}
+            .gamma-metric-item:nth-child(n+3) {{border-bottom: 0;}}
+            .gamma-metric-item span {{font-size: .69rem;}}
+            .gamma-metric-item strong {{font-size: .96rem;}}
+          }}
+        </style>
+        <div class="gamma-metric-strip">{metrics_html}</div>
+        """,
+        unsafe_allow_html=True,
+    )
     st.caption(
         f"Saved chain {latest_date:%Y-%m-%d} · {_scope_label(scope, chain)} · "
         f"{len(analysis_chain):,} contracts. Calls positive, puts negative."
