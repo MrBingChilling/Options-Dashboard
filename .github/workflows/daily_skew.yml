@@ -2,26 +2,21 @@ name: Daily IV and GEX surface snapshot
 
 on:
   # 07:10 Vancouver = 10:10 New York, safely after MarketData's 09:30 ET
-  # historical-options rollover. Backup triggers share the same Supabase credit
-  # ledger and request only tickers whose 1W + 1M 25D rows are still missing.
-  # Saturday captures Friday's completed session; Monday remains a no-cost fallback.
+  # historical-options rollover. Historical chains are one trading day old, so
+  # Friday becomes available on Monday. Backup triggers share the same Supabase
+  # credit ledger and request only tickers whose 1W + 1M 25D rows are missing.
   schedule:
-    - cron: "10 7 * * 1-6"
+    - cron: "10 7 * * 1-5"
       timezone: "America/Vancouver"
-    - cron: "25 7 * * 1-6"
+    - cron: "25 7 * * 1-5"
       timezone: "America/Vancouver"
-    - cron: "40 7 * * 1-6"
+    - cron: "40 7 * * 1-5"
       timezone: "America/Vancouver"
-    - cron: "55 7 * * 1-6"
+    - cron: "55 7 * * 1-5"
       timezone: "America/Vancouver"
-    - cron: "10 8 * * 1-6"
+    - cron: "10 8 * * 1-5"
       timezone: "America/Vancouver"
   workflow_dispatch:
-  # Temporary one-commit trigger for today's missed Saturday collection.
-  push:
-    branches: [main]
-    paths:
-      - ".github/workflows/daily_skew.yml"
 
 concurrency:
   group: daily-iv-gex-surface
