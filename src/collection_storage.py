@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from datetime import date
+from datetime import date, datetime
 from typing import Any, Iterable
 
 import requests
@@ -91,7 +91,13 @@ def resolved_snapshot_date_for_requested_date(
     collector: str,
     requested_date: date,
 ) -> date | None:
-    """Reuse the provider-resolved closed session on backup workflow runs."""
+    """Reuse a provider-resolved session without locking in a weekend stale row.
+
+    MarketData historical option chains are one trading day old. A weekend probe
+    for Friday can therefore return Thursday even though Friday is a valid session.
+    Ignore that mismatch so Monday can retry Friday after the next rollover. A
+    mismatch first observed on a weekday is retained for genuine market holidays.
+    """
     rows = _collection_rows(
         store,
         collector,
@@ -107,9 +113,23 @@ def resolved_snapshot_date_for_requested_date(
         if not raw:
             continue
         try:
-            return date.fromisoformat(str(raw)[:10])
+            resolved = date.fromisoformat(str(raw)[:10])
         except ValueError:
             continue
+        if resolved == requested_date:
+            return resolved
+        if resolved > requested_date:
+            continue
+
+        created_at = row.get("created_at")
+        if not created_at:
+            continue
+        try:
+            created = datetime.fromisoformat(str(created_at).replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if created.weekday() < 5:
+            return resolved
     return None
 
 
