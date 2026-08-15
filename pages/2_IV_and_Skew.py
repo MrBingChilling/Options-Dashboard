@@ -221,41 +221,44 @@ def history_source_symbols(keys: list[str]) -> list[str]:
 def historical_chart_series(
     history: pd.DataFrame,
     source_keys: list[str],
-    metric: str,
+    metrics: list[str],
     change_mode: str,
 ) -> tuple[pd.DataFrame, dict[str, tuple[float, float]]]:
     columns: list[pd.Series] = []
     coverage: dict[str, tuple[float, float]] = {}
+    multiple_metrics = len(metrics) > 1
     for key in source_keys:
         parts = key.split("|")
-        label = history_source_label(key)
-        if parts[0] == "agg" and len(parts) == 3:
-            source = aggregate_history(
-                history,
-                AGGREGATION_GROUPS.get(parts[1], []),
-                metric,
-                parts[2],
-            )
-            if not source.empty and "coverage" in source.columns:
-                coverage[label] = (
-                    float(pd.to_numeric(source["coverage"], errors="coerce").min()),
-                    float(pd.to_numeric(source["coverage"], errors="coerce").median()),
+        source_label = history_source_label(key)
+        for metric in metrics:
+            label = f"{source_label} · {metric}" if multiple_metrics else source_label
+            if parts[0] == "agg" and len(parts) == 3:
+                source = aggregate_history(
+                    history,
+                    AGGREGATION_GROUPS.get(parts[1], []),
+                    metric,
+                    parts[2],
                 )
-        elif parts[0] in {"index", "ticker"} and len(parts) == 2:
-            source = individual_history(history, parts[1], metric)
-        else:
-            continue
-        source = apply_change_mode(source, change_mode)
-        if source.empty:
-            continue
-        values = pd.to_numeric(source["value"], errors="coerce") * 100.0
-        columns.append(
-            pd.Series(
-                values.to_numpy(),
-                index=pd.to_datetime(source["snapshot_date"]),
-                name=label,
+                if not source.empty and "coverage" in source.columns:
+                    coverage[label] = (
+                        float(pd.to_numeric(source["coverage"], errors="coerce").min()),
+                        float(pd.to_numeric(source["coverage"], errors="coerce").median()),
+                    )
+            elif parts[0] in {"index", "ticker"} and len(parts) == 2:
+                source = individual_history(history, parts[1], metric)
+            else:
+                continue
+            source = apply_change_mode(source, change_mode)
+            if source.empty:
+                continue
+            values = pd.to_numeric(source["value"], errors="coerce") * 100.0
+            columns.append(
+                pd.Series(
+                    values.to_numpy(),
+                    index=pd.to_datetime(source["snapshot_date"]),
+                    name=label,
+                )
             )
-        )
     if not columns:
         return pd.DataFrame(), coverage
     return pd.concat(columns, axis=1).sort_index(), coverage
@@ -517,7 +520,7 @@ st.divider()
 st.subheader("Historical Trend")
 st.caption(
     "One selector contains representative aggregates first, then indexes, then individual tickers. "
-    "Select multiple entries only when you want to compare lines."
+    "Select one or more ticker/aggregation entries and metrics; each combination is plotted as a line."
 )
 history_sources = st.multiselect(
     "Ticker / aggregation",
@@ -527,11 +530,16 @@ history_sources = st.multiselect(
     key="iv_history_series",
 )
 metric_col, tenor_col = st.columns([2.2, 1.2])
-history_metric = metric_col.selectbox(
+legacy_history_metric = st.session_state.get("iv_history_metric", HISTORY_METRIC_ORDER[0])
+default_history_metrics = [
+    legacy_history_metric if legacy_history_metric in HISTORY_METRIC_ORDER else HISTORY_METRIC_ORDER[0]
+]
+history_metrics = metric_col.multiselect(
     "Metric",
     HISTORY_METRIC_ORDER,
-    index=0,
-    key="iv_history_metric",
+    default=default_history_metrics,
+    key="iv_history_metrics",
+    help="Select one or multiple metrics. With multiple metrics, line labels show both the source and metric.",
 )
 history_tenor = tenor_col.segmented_control(
     "Tenor",
@@ -554,6 +562,8 @@ history_period = period_col.segmented_control(
 
 if not history_sources:
     st.info("Choose at least one ticker or aggregation.")
+elif not history_metrics:
+    st.info("Choose at least one metric.")
 elif store.enabled:
     history_symbols = history_source_symbols(history_sources)
     end_date = datetime.now(EASTERN).date()
@@ -575,7 +585,7 @@ elif store.enabled:
         chart_data, coverage = historical_chart_series(
             hist,
             history_sources,
-            history_metric,
+            history_metrics,
             change_mode,
         )
         if chart_data.dropna(how="all").empty:
@@ -594,8 +604,9 @@ elif store.enabled:
             )
             first_date = pd.to_datetime(chart_data.index.min()).date()
             last_date = pd.to_datetime(chart_data.index.max()).date()
+            metrics_label = ", ".join(history_metrics)
             st.caption(
-                f"{history_metric} · {history_tenor} · {change_mode}. {first_date} → {last_date}. "
+                f"{metrics_label} · {history_tenor} · {change_mode}. {first_date} → {last_date}. "
                 "Drag/pinch to pan or zoom; drag the right price scale to stretch/compress Y."
             )
             if coverage:
