@@ -17,6 +17,11 @@ on:
     - cron: "10 8 * * 1-6"
       timezone: "America/Vancouver"
   workflow_dispatch:
+  # Temporary one-commit trigger for today's missed Saturday collection.
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/daily_skew.yml"
 
 concurrency:
   group: daily-iv-gex-surface
