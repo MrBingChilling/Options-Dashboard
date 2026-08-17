@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import MutableMapping, Sequence
 from datetime import date
+from typing import Any
 
 import streamlit as st
 
@@ -8,6 +10,30 @@ from src.daily_ai_summary import DailySummary, load_daily_summaries
 from src.storage import SnapshotStore, SnapshotStoreError
 
 
+SUMMARY_REFRESH_INTERVAL = "15s"
+REPORT_DATE_STATE_KEY = "ai_summary_report_date"
+LATEST_REPORT_STATE_KEY = "_ai_summary_latest_report"
+
+
+def sync_report_selection(
+    available_dates: Sequence[date],
+    state: MutableMapping[str, Any],
+) -> date:
+    """Select a newly arrived report without overriding manual history browsing."""
+    if not available_dates:
+        raise ValueError("At least one report date is required.")
+
+    latest_date = available_dates[0]
+    selected_date = state.get(REPORT_DATE_STATE_KEY)
+    latest_seen = state.get(LATEST_REPORT_STATE_KEY)
+    if latest_seen != latest_date or selected_date not in available_dates:
+        selected_date = latest_date
+        state[REPORT_DATE_STATE_KEY] = selected_date
+    state[LATEST_REPORT_STATE_KEY] = latest_date
+    return selected_date
+
+
+@st.fragment(run_every=SUMMARY_REFRESH_INTERVAL)
 def render_ai_summary_dashboard(store: SnapshotStore) -> None:
     """Render saved daily market insights inside the IV & Skew page."""
     st.markdown(
@@ -36,7 +62,8 @@ def render_ai_summary_dashboard(store: SnapshotStore) -> None:
     st.subheader("Daily AI Summary")
     st.caption(
         "Automatically generated from the newest complete 49-ticker daily snapshot. "
-        "The summary is saved after the morning collector and uses 0 additional MarketData credits."
+        "The summary is saved after the morning collector and uses 0 additional MarketData credits. "
+        "This view checks for a new saved report every 15 seconds."
     )
 
     if not store.enabled:
@@ -60,16 +87,18 @@ def render_ai_summary_dashboard(store: SnapshotStore) -> None:
         report.snapshot_date: report for report in reports
     }
     available_dates = list(report_by_date)
+    selected_date = sync_report_selection(available_dates, st.session_state)
     if len(available_dates) > 1:
         selected_date = st.selectbox(
             "Report date",
             available_dates,
-            index=0,
+            key=REPORT_DATE_STATE_KEY,
             format_func=lambda value: value.strftime("%b %d, %Y"),
-            help="The newest saved report is selected by default.",
+            help=(
+                "A newly saved report is selected automatically. You can still choose an "
+                "older report until the next daily report arrives."
+            ),
         )
-    else:
-        selected_date = available_dates[0]
     report = report_by_date[selected_date]
     comparison_parts = [f"{report.comparison_date:%b %d} (1D)"]
     if report.week_comparison_date:
