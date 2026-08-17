@@ -16,6 +16,10 @@ _component_func = components.declare_component(COMPONENT_NAME, path=str(_build_d
 def _with_explicit_point_markers(charts):
     patched = deepcopy(charts)
     for pane in patched or []:
+        chart_options = pane.setdefault("chart", {})
+        chart_options.setdefault("leftPriceScale", {})["visible"] = True
+        chart_options.setdefault("rightPriceScale", {})["visible"] = False
+
         for series in pane.get("series", []):
             if series.get("type") != "Line":
                 continue
@@ -23,6 +27,7 @@ def _with_explicit_point_markers(charts):
             if not data:
                 continue
             options = series.setdefault("options", {})
+            options["priceScaleId"] = "left"
             color = options.get("color", "#5B8FF9")
             series["markers"] = [
                 {
@@ -58,7 +63,7 @@ def lightweight_charts_v5_component(
     key=None,
 ):
     default_value = None if take_screenshot else 0
-    component_key = f"{key}-explicit-markers-v2" if key and name == "Historical IV & skew" else key
+    component_key = f"{key}-explicit-markers-v3" if key and name == "Historical IV & skew" else key
     if charts is not None:
         rendered_charts = _with_explicit_point_markers(charts) if name == "Historical IV & skew" else charts
         return _component_func(
