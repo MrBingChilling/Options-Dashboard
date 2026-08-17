@@ -50,3 +50,20 @@ def test_removed_report_selection_falls_back_to_latest():
 
     assert selected == latest
     assert state[REPORT_DATE_STATE_KEY] == latest
+
+
+def test_rewritten_latest_report_is_selected_by_freshness_token():
+    older = date(2026, 8, 13)
+    latest = date(2026, 8, 14)
+    previous_token = (latest, "old-write", "daily_ai_summary_v2")
+    current_token = (latest, "new-write", "chatgpt_scheduled_analysis_v1")
+    state = {
+        REPORT_DATE_STATE_KEY: older,
+        LATEST_REPORT_STATE_KEY: previous_token,
+    }
+
+    selected = sync_report_selection([latest, older], state, current_token)
+
+    assert selected == latest
+    assert state[REPORT_DATE_STATE_KEY] == latest
+    assert state[LATEST_REPORT_STATE_KEY] == current_token

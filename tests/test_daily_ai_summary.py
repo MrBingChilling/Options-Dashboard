@@ -153,6 +153,7 @@ def test_summary_history_loads_newest_first(monkeypatch):
 
     def fake_get(url, params, headers, timeout):
         assert params["order"] == "snapshot_date.desc"
+        assert headers["Cache-Control"] == "no-cache, no-store, max-age=0"
         return Response()
 
     monkeypatch.setattr("src.daily_ai_summary.requests.get", fake_get)

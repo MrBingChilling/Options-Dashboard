@@ -78,6 +78,7 @@ class DailySummary:
     week_comparison_date: date | None = None
     month_comparison_date: date | None = None
     generator_version: str = GENERATOR_VERSION
+    generated_at: datetime | None = None
 
     def record(self) -> dict[str, Any]:
         return {
@@ -107,7 +108,9 @@ class DailySummary:
                     "It does not use news, event calendars or observed option order flow."
                 ),
             },
-            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "generated_at": (
+                self.generated_at or datetime.now(timezone.utc)
+            ).isoformat(),
         }
 
     @classmethod
@@ -126,6 +129,16 @@ class DailySummary:
             value = comparison_dates.get(key)
             return date.fromisoformat(str(value)[:10]) if value else None
 
+        generated_at: datetime | None = None
+        raw_generated_at = record.get("generated_at")
+        if raw_generated_at:
+            try:
+                generated_at = datetime.fromisoformat(
+                    str(raw_generated_at).replace("Z", "+00:00")
+                )
+            except ValueError:
+                pass
+
         return cls(
             snapshot_date=date.fromisoformat(str(record["snapshot_date"])[:10]),
             comparison_date=date.fromisoformat(str(record["comparison_date"])[:10]),
@@ -136,6 +149,7 @@ class DailySummary:
             week_comparison_date=optional_date("1W"),
             month_comparison_date=optional_date("1M"),
             generator_version=str(record.get("generator_version") or GENERATOR_VERSION),
+            generated_at=generated_at,
         )
 
 
@@ -182,7 +196,11 @@ def load_daily_summaries(store: SnapshotStore, limit: int = 90) -> list[DailySum
             "order": "snapshot_date.desc",
             "limit": str(max(1, int(limit))),
         },
-        headers=store.headers,
+        headers={
+            **store.headers,
+            "Cache-Control": "no-cache, no-store, max-age=0",
+            "Pragma": "no-cache",
+        },
         timeout=store.timeout,
     )
     if response.status_code != 200:

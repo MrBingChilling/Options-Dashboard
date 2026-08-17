@@ -18,18 +18,20 @@ LATEST_REPORT_STATE_KEY = "_ai_summary_latest_report"
 def sync_report_selection(
     available_dates: Sequence[date],
     state: MutableMapping[str, Any],
+    latest_report_token: Any | None = None,
 ) -> date:
-    """Select a newly arrived report without overriding manual history browsing."""
+    """Select newly arrived or rewritten data without disrupting history browsing."""
     if not available_dates:
         raise ValueError("At least one report date is required.")
 
     latest_date = available_dates[0]
+    latest_marker = latest_report_token if latest_report_token is not None else latest_date
     selected_date = state.get(REPORT_DATE_STATE_KEY)
     latest_seen = state.get(LATEST_REPORT_STATE_KEY)
-    if latest_seen != latest_date or selected_date not in available_dates:
+    if latest_seen != latest_marker or selected_date not in available_dates:
         selected_date = latest_date
         state[REPORT_DATE_STATE_KEY] = selected_date
-    state[LATEST_REPORT_STATE_KEY] = latest_date
+    state[LATEST_REPORT_STATE_KEY] = latest_marker
     return selected_date
 
 
@@ -65,6 +67,11 @@ def render_ai_summary_dashboard(store: SnapshotStore) -> None:
         "The scheduled analysis is saved after the morning collector and uses 0 additional MarketData credits. "
         "This view checks for a new saved report every 15 seconds."
     )
+    st.button(
+        "Refresh now",
+        key="ai_summary_refresh_now",
+        help="Fetch the newest saved report immediately.",
+    )
 
     if not store.enabled:
         st.info("Configure Supabase to load saved daily summaries.")
@@ -87,7 +94,17 @@ def render_ai_summary_dashboard(store: SnapshotStore) -> None:
         report.snapshot_date: report for report in reports
     }
     available_dates = list(report_by_date)
-    selected_date = sync_report_selection(available_dates, st.session_state)
+    latest_report = report_by_date[available_dates[0]]
+    latest_report_token = (
+        latest_report.snapshot_date,
+        latest_report.generated_at,
+        latest_report.generator_version,
+    )
+    selected_date = sync_report_selection(
+        available_dates,
+        st.session_state,
+        latest_report_token,
+    )
     if len(available_dates) > 1:
         selected_date = st.selectbox(
             "Report date",
