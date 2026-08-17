@@ -1,3 +1,15 @@
+import sys
+from pathlib import Path
+
+# Ensure repo-local modules take precedence over same-named installed packages.
+# This is important for the customized lightweight_charts_v5 wrapper used by
+# the Historical IV & Skew chart.
+ROOT = Path(__file__).resolve().parent
+root_text = str(ROOT)
+if root_text in sys.path:
+    sys.path.remove(root_text)
+sys.path.insert(0, root_text)
+
 import streamlit as st
 
 # Vega/Altair tooltips can remain pinned after a tap on touch devices and cover
