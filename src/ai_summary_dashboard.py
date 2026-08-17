@@ -61,7 +61,8 @@ def render_ai_summary_dashboard(store: SnapshotStore) -> None:
 
     st.subheader("Daily AI Summary")
     st.caption(
-        "Automatically generated from the newest complete 49-ticker daily snapshot. "
+        "Fresh, independently model-written analysis of the newest complete "
+        "49-ticker daily snapshot. "
         "The summary is saved after the morning collector and uses 0 additional MarketData credits. "
         "This view checks for a new saved report every 15 seconds."
     )

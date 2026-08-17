@@ -6,9 +6,16 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 
+from src.daily_ai_analysis import build_analysis_packet
+from src.daily_ai_model import (
+    DEFAULT_MODEL,
+    SummaryGenerationError,
+    generate_daily_summary,
+)
 from src.daily_ai_summary import (
+    GENERATOR_VERSION,
     SummaryNotReady,
-    build_daily_summary,
+    load_daily_summaries,
     save_daily_summary,
 )
 from src.skew_collector import AUTO_SYMBOLS, DAILY_TENORS
@@ -53,12 +60,47 @@ def main() -> int:
 
     history = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
     try:
-        summary = build_daily_summary(history, AUTO_SYMBOLS)
+        prior_summaries = load_daily_summaries(store, limit=6)
+    except SnapshotStoreError as exc:
+        raise SystemExit(f"Could not load prior daily summaries: {exc}")
+    model = os.environ.get("OPENAI_SUMMARY_MODEL", DEFAULT_MODEL).strip() or DEFAULT_MODEL
+    expected_version = f"{GENERATOR_VERSION}:{model}"
+    try:
+        packet = build_analysis_packet(history, AUTO_SYMBOLS, prior_summaries)
     except SummaryNotReady as exc:
-        # A partial first run is expected to be completed by the scheduled
-        # backups. Keep the workflow green so the collector can resume later.
         print(f"[summary-wait] {exc}", flush=True)
         return 0
+    latest_session = packet.snapshot_date
+    force = os.environ.get("FORCE_DAILY_AI_SUMMARY", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+    if not force and any(
+        report.snapshot_date == latest_session
+        and report.generator_version == expected_version
+        and report.input_signature == packet.input_signature
+        for report in prior_summaries
+    ):
+        print(
+            f"[summary-current] session={latest_session} generator={expected_version}",
+            flush=True,
+        )
+        return 0
+
+    try:
+        summary = generate_daily_summary(
+            history,
+            AUTO_SYMBOLS,
+            api_key=os.environ.get("OPENAI_API_KEY", ""),
+            model=model,
+            prior_summaries=prior_summaries,
+            analysis_packet=packet,
+        )
+    except SummaryGenerationError as exc:
+        # Do not save deterministic or stale prose. A failed run stays failed so
+        # the scheduled backup run can retry genuine model analysis.
+        raise SystemExit(f"Could not generate fresh daily AI summary: {exc}")
 
     try:
         save_daily_summary(store, summary)

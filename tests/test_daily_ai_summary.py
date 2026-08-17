@@ -1,14 +1,16 @@
 from __future__ import annotations
 
+import json
 from datetime import date
 
 import pandas as pd
+import pytest
 
+from src.daily_ai_analysis import build_analysis_packet, complete_summary_sessions
+from src.daily_ai_model import SummaryGenerationError, generate_daily_summary
 from src.daily_ai_summary import (
     DailySummary,
     SummaryBullet,
-    build_daily_summary,
-    complete_summary_sessions,
     load_daily_summaries,
     save_daily_summary,
 )
@@ -60,20 +62,185 @@ def _history() -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def test_summary_uses_latest_two_fully_complete_sessions():
-    summary = build_daily_summary(_history(), AUTO_SYMBOLS)
+def _model_output() -> dict[str, object]:
+    return {
+        "bullets": [
+            {
+                "title": "Compression remains broad, but its pace is changing.",
+                "body": "The cross-section shows a persistent fall in short-dated ATM IV across the monthly horizon, while today's smaller move says the regime is maturing rather than newly accelerating.",
+            },
+            {
+                "title": "Index skew diverged from the single-name backdrop.",
+                "body": "SPY and QQQ repriced short-dated downside relative to calls even as the broader basket remained calmer, making this a cross-asset relative-pricing change rather than a uniform volatility shock.",
+            },
+            {
+                "title": "WOLF is the concentrated exception.",
+                "body": "Its one-week skew changed much more sharply than the basket measures, and the gap between equal-weight and trimmed aggregates confirms that the move should not be generalized to all AI infrastructure names.",
+            },
+            {
+                "title": "Tenor confirmation is selective, not universal.",
+                "body": "Where one-week and one-month surfaces agree, the signal deserves more weight; elsewhere the mixed tenor evidence argues for treating the latest move as localized rather than a durable new regime.",
+            },
+        ],
+        "bottom_line": "Broad volatility compression remains the governing backdrop, but the useful new information is the divergence between firmer index downside pricing and a small number of concentrated single-name exceptions.",
+    }
+
+
+def _openai_response(output: dict[str, object]):
+    class Response:
+        status_code = 200
+        text = ""
+        headers: dict[str, str] = {}
+
+        @staticmethod
+        def json():
+            return {
+                "status": "completed",
+                "output": [
+                    {
+                        "type": "message",
+                        "content": [
+                            {"type": "output_text", "text": json.dumps(output)}
+                        ],
+                    }
+                ],
+            }
+
+    return Response()
+
+
+def test_analysis_packet_contains_full_cross_section_and_non_template_context():
+    older = DailySummary(
+        snapshot_date=date(2026, 8, 12),
+        comparison_date=date(2026, 8, 6),
+        symbol_count=49,
+        expected_symbol_count=49,
+        bullets=(SummaryBullet("Earlier observation", "Use this only as context."),),
+        bottom_line="Earlier conclusion.",
+    )
+    same_day = DailySummary(
+        snapshot_date=date(2026, 8, 13),
+        comparison_date=date(2026, 8, 12),
+        symbol_count=49,
+        expected_symbol_count=49,
+        bullets=(SummaryBullet("Stale same-day prose", "Exclude this from the prompt."),),
+        bottom_line="Stale conclusion.",
+    )
+
+    packet = build_analysis_packet(_history(), AUTO_SYMBOLS, [same_day, older])
+
+    assert packet.snapshot_date == date(2026, 8, 13)
+    assert packet.comparison_date == date(2026, 8, 12)
+    assert packet.week_comparison_date == date(2026, 8, 6)
+    assert packet.month_comparison_date == date(2026, 7, 15)
+    assert packet.symbol_count == packet.expected_symbol_count == 49
+    assert len(packet.input_signature) == 64
+    assert packet.payload["session"]["input_signature"] == packet.input_signature
+    assert len(packet.payload["symbols"]) == 49
+    wolf = next(row for row in packet.payload["symbols"] if row["symbol"] == "WOLF")
+    assert set(wolf["tenors"]) == {"1W", "1M"}
+    assert set(wolf["spot_returns_pct"]) == {"1D", "1W", "1M"}
+    assert set(wolf["tenors"]["1W"]["skew_25d"]["changes_vol_points"]) == {
+        "1D",
+        "1W",
+        "1M",
+    }
+    dashboard_atm = packet.payload["baskets"]["Dashboard ex-index"]["tenors"]["1W"]["atm_iv"]
+    assert set(dashboard_atm["horizons"]) == {"1D", "1W", "1M"}
+    assert "current_equal" in dashboard_atm["horizons"]["1D"]
+    assert "current_trimmed_10pct" in dashboard_atm["horizons"]["1D"]
+    assert "breadth_lower_pct" in dashboard_atm["horizons"]["1D"]
+    assert set(packet.payload["baskets"]["Dashboard ex-index"]["spot_returns_pct"]) == {
+        "1D",
+        "1W",
+        "1M",
+    }
+    assert packet.payload["prior_reports_for_continuity_only"] == [
+        {
+            "snapshot_date": "2026-08-12",
+            "bullets": [
+                {"title": "Earlier observation", "body": "Use this only as context."}
+            ],
+            "bottom_line": "Earlier conclusion.",
+        }
+    ]
+
+
+def test_generation_calls_model_for_fresh_structured_analysis(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def fake_post(url, headers, json, timeout):
+        captured.update({"url": url, "headers": headers, "json": json, "timeout": timeout})
+        return _openai_response(_model_output())
+
+    monkeypatch.setattr("src.daily_ai_model.requests.post", fake_post)
+
+    summary = generate_daily_summary(
+        _history(),
+        AUTO_SYMBOLS,
+        api_key="sk-test",
+        model="gpt-5.6",
+    )
 
     assert summary.snapshot_date == date(2026, 8, 13)
     assert summary.comparison_date == date(2026, 8, 12)
-    assert summary.week_comparison_date == date(2026, 8, 6)
-    assert summary.month_comparison_date == date(2026, 7, 15)
-    assert summary.symbol_count == summary.expected_symbol_count == 49
-    assert "multi-week regime" in summary.bullets[0].title
-    assert any("index" in bullet.title.lower() for bullet in summary.bullets)
-    assert any("WOLF" in bullet.title for bullet in summary.bullets)
-    assert "49" not in summary.bottom_line  # Coverage belongs in page metadata, not prose.
-    assert len(summary.bullets) <= 9
-    assert len(" ".join(f"{item.title} {item.body}" for item in summary.bullets).split()) <= 520
+    assert summary.generator_version == "daily_ai_summary_llm_v1:gpt-5.6"
+    assert summary.input_signature
+    assert [bullet.title for bullet in summary.bullets] == [
+        item["title"] for item in _model_output()["bullets"]
+    ]
+    assert summary.bottom_line == _model_output()["bottom_line"]
+    request_body = captured["json"]
+    assert captured["url"] == "https://api.openai.com/v1/responses"
+    assert request_body["model"] == "gpt-5.6"
+    assert request_body["reasoning"] == {"effort": "high"}
+    assert request_body["max_output_tokens"] == 8000
+    assert request_body["store"] is False
+    assert request_body["text"]["format"]["strict"] is True
+    assert request_body["text"]["format"]["schema"]["additionalProperties"] is False
+    assert "Do not fit the facts" in request_body["input"][0]["content"]
+    assert "WOLF" in request_body["input"][1]["content"]
+    assert "2026-08-13" in request_body["input"][1]["content"]
+
+
+def test_missing_api_key_fails_without_a_template_fallback(monkeypatch):
+    def unexpected_post(*args, **kwargs):
+        raise AssertionError("The API must not be called without a key.")
+
+    monkeypatch.setattr("src.daily_ai_model.requests.post", unexpected_post)
+
+    with pytest.raises(SummaryGenerationError, match="no deterministic prose fallback"):
+        generate_daily_summary(_history(), AUTO_SYMBOLS, api_key="")
+
+
+def test_reused_prior_headline_is_rejected_instead_of_saved(monkeypatch):
+    prior = DailySummary(
+        snapshot_date=date(2026, 8, 12),
+        comparison_date=date(2026, 8, 6),
+        symbol_count=49,
+        expected_symbol_count=49,
+        bullets=(
+            SummaryBullet(
+                "Compression remains broad, but its pace is changing.",
+                "Older body.",
+            ),
+        ),
+        bottom_line="Older conclusion.",
+    )
+
+    monkeypatch.setattr(
+        "src.daily_ai_model.requests.post",
+        lambda *args, **kwargs: _openai_response(_model_output()),
+    )
+    monkeypatch.setattr("src.daily_ai_model.time.sleep", lambda *_: None)
+
+    with pytest.raises(SummaryGenerationError, match="reused a prior headline"):
+        generate_daily_summary(
+            _history(),
+            AUTO_SYMBOLS,
+            api_key="sk-test",
+            prior_summaries=[prior],
+        )
 
 
 def test_session_is_not_complete_when_one_required_tenor_is_missing():
@@ -128,6 +295,8 @@ def test_daily_summary_round_trips_through_supabase_payload(monkeypatch):
         "1W": "2026-08-06",
         "1M": "2026-07-15",
     }
+    assert "Fresh model-written analysis" in stored["summary"]["data_note"]
+    assert "input_signature" in stored["summary"]
 
 
 def test_summary_history_loads_newest_first(monkeypatch):
@@ -163,4 +332,4 @@ def test_summary_history_loads_newest_first(monkeypatch):
     assert len(reports) == 1
     assert reports[0].snapshot_date == date(2026, 8, 13)
     assert reports[0].bullets[0].body == "Body"
-    assert reports[0].week_comparison_date is None  # v1 records remain readable.
+    assert reports[0].week_comparison_date is None
