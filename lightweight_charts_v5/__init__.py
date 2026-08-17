@@ -16,10 +16,12 @@ _component_func = components.declare_component(COMPONENT_NAME, path=str(_build_d
 def _with_explicit_point_markers(charts):
     patched = deepcopy(charts)
     for pane in patched or []:
-        # The upstream component defaults every series to the right price scale.
-        # For the Historical IV & skew chart we explicitly move the visible
-        # price axis AND every series (including last-value labels) to the left.
+        # Historical chart only: force the left price scale at both chart and
+        # series level. Lightweight Charts 5.2 also has a chart-level default
+        # visible scale preference; setting it removes any remaining fallback
+        # to the right scale when the frontend creates/recreates series.
         chart_options = pane.setdefault("chart", {})
+        chart_options["defaultVisiblePriceScaleId"] = "left"
         chart_options["leftPriceScale"] = {
             "visible": True,
             "borderVisible": True,
@@ -74,9 +76,9 @@ def lightweight_charts_v5_component(
     key=None,
 ):
     default_value = None if take_screenshot else 0
-    # Change the component key when chart wiring changes so Streamlit mounts a
-    # fresh frontend instance instead of reusing the prior right-axis component.
-    component_key = f"{key}-historical-left-axis-v1" if key and name == "Historical IV & skew" else key
+    # Remount after chart wiring changes so Streamlit cannot reuse the previous
+    # right-axis frontend instance.
+    component_key = f"{key}-historical-left-axis-v2" if key and name == "Historical IV & skew" else key
     if charts is not None:
         rendered_charts = _with_explicit_point_markers(charts) if name == "Historical IV & skew" else charts
         return _component_func(
