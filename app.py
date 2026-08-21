@@ -12,6 +12,8 @@ sys.path.insert(0, root_text)
 
 import streamlit as st
 
+# Production refresh marker: confirmed earnings calendar v2 (2026-08-21).
+
 # Vega/Altair tooltips can remain pinned after a tap on touch devices and cover
 # much of the chart. Keep desktop hover tooltips, but suppress them on coarse
 # touch screens where ticker/value labels and the details table are available.

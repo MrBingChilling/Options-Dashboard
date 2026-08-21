@@ -179,6 +179,13 @@ def render_calendar_dashboard() -> None:
 
     if earnings_error:
         st.warning(earnings_error)
+    elif earnings_events:
+        st.success(
+            f"{len(earnings_events)} confirmed upcoming watchlist earnings "
+            f"date{'s' if len(earnings_events) != 1 else ''} loaded."
+        )
+    else:
+        st.info("No confirmed upcoming watchlist earnings dates are currently stored.")
     if not events:
         st.info("No upcoming calendar events are configured.")
         return
