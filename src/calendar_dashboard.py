@@ -108,13 +108,15 @@ def _event_row(event: CalendarDisplayEvent, is_next: bool) -> str:
 def _next_card(label: str, event: CalendarDisplayEvent, today: date) -> str:
     days_away = (event.event_date - today).days
     timing = "Today" if days_away == 0 else f"In {days_away} day{'s' if days_away != 1 else ''}"
-    return f"""
-        <div class="calendar-next">
-          <div class="calendar-next-label">{html.escape(label)}</div>
-          <div class="calendar-next-date">{event.event_date.strftime('%B')} {event.event_date.day}, {event.event_date.year}</div>
-          <div class="calendar-next-meta">{html.escape(event.title)} · {event.event_date.strftime('%A')} · {timing}</div>
-        </div>
-    """
+    return (
+        '<div class="calendar-next">'
+        f'<div class="calendar-next-label">{html.escape(label)}</div>'
+        f'<div class="calendar-next-date">{event.event_date.strftime("%B")} '
+        f'{event.event_date.day}, {event.event_date.year}</div>'
+        f'<div class="calendar-next-meta">{html.escape(event.title)} · '
+        f'{event.event_date.strftime("%A")} · {timing}</div>'
+        '</div>'
+    )
 
 
 def render_calendar_dashboard() -> None:
