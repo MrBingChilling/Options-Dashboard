@@ -187,3 +187,30 @@ on conflict (id) do nothing;
 
 -- Make newly created tables and constraints visible to Supabase's REST API immediately.
 notify pgrst, 'reload schema';
+
+create table if not exists public.earnings_calendar (
+    symbol text not null,
+    company_name text not null,
+    earnings_date date not null,
+    session text not null default 'Time not specified'
+        check (session in ('Before open', 'After close', 'Time not specified')),
+    fiscal_period text not null default '',
+    confirmed boolean not null default true check (confirmed),
+    source_url text not null,
+    source_title text not null,
+    last_verified_at timestamptz not null default now(),
+    created_at timestamptz not null default now(),
+    updated_at timestamptz not null default now(),
+    primary key (symbol, earnings_date)
+);
+
+create index if not exists earnings_calendar_date_symbol_idx
+    on public.earnings_calendar (earnings_date, symbol);
+
+alter table public.earnings_calendar enable row level security;
+revoke all on table public.earnings_calendar from anon, authenticated;
+
+comment on table public.earnings_calendar is
+    'Private confirmed earnings dates for individual stocks in the dashboard watchlist. Estimated, inferred, preliminary and unconfirmed dates are excluded.';
+
+notify pgrst, 'reload schema';
